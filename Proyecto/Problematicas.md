@@ -5,28 +5,23 @@ en poblaciones remotas del Perú.
 
 ### Problemática 2
 
-La ausencia de una herramienta no invasiva, objetiva y de bajo costo entre la evaluación física y los estudios por imagen dificulta el tamizaje 
-oportuno de posibles eventraciones abdominales. 
+La ausencia de una herramienta no invasiva, objetiva y de bajo costo entre la evaluación física y los estudios por imagen dificulta el tamizaje oportuno de posibles eventraciones abdominales. 
 
 https://pmc.ncbi.nlm.nih.gov/articles/PMC10638550/
-muestra que el examen físico es el método menos preciso: frente a ecografía, su sensibilidad está entre 42% y 75%; frente a TC, entre 48% y 81%. 
-Cuando el examen clínico no es definitivo, recomienda recurrir a imagen 
+muestra que el examen físico es el método menos preciso: frente a ecografía, su sensibilidad está entre 42% y 75%; frente a TC, entre 48% y 81%. Cuando el examen clínico no es definitivo, recomienda recurrir a imagen 
 
 
 https://pmc.ncbi.nlm.nih.gov/articles/PMC10173835/
-la TC (muy utilizada) presenta inconvenientes como exposición a radiación y costo relativamente elevado, y estudia la ecografía como una alternativa 
-más accesible para caracterizar hernias incisionales. 
+la TC (muy utilizada) presenta inconvenientes como exposición a radiación y costo relativamente elevado, y estudia la ecografía como una alternativa más accesible para caracterizar hernias incisionales. 
 
 
 https://pmc.ncbi.nlm.nih.gov/articles/PMC5978894/
-cuantifica muy claramente la brecha: entre 15% y 58% de las hernias incisionales fueron detectadas únicamente mediante imagen, es decir, no mediante 
-examen físico. La discrepancia entre examen físico e imagen llegó hasta 39%. 
+cuantifica muy claramente la brecha: entre 15% y 58% de las hernias incisionales fueron detectadas únicamente mediante imagen, es decir, no mediante examen físico. La discrepancia entre examen físico e imagen llegó hasta 39%. 
 
 
 ### Problemática 3
 
-La falta de médicos y el uso del estetoscopio común impiden detectar la neumonía a tiempo en el Perú. Esto causa altas tasas de mortalidad en las 
-zonas rurales del país. Un estetoscopio digital con IA automatiza el diagnóstico, permitiendo que cualquier persona salve vidas. 
+La falta de médicos y el uso del estetoscopio común impiden detectar la neumonía a tiempo en el Perú. Esto causa altas tasas de mortalidad en las zonas rurales del país. Un estetoscopio digital con IA automatiza el diagnóstico, permitiendo que cualquier persona salve vidas. 
 
 
 ## Fuentes bibliográficas
