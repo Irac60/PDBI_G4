@@ -43,35 +43,37 @@
 gantt
     title Cronograma del proyecto
     dateFormat YYYY-MM-DD
-    axisFormat %d/%m
+    axisFormat Semana %W
+    tickInterval 1week
     todayMarker off
 
     section Investigación
-    Definición de la problemática             :a1, 2026-09-01, 7d
-    Plan de trabajo                           :a2, 2026-09-01, 14d
-    Revisión bibliográfica                    :a3, 2026-09-01, 21d
-    Estado de la tecnología                   :a4, 2026-09-01, 21d
+    Definición de la problemática             :a1, 2026-01-05, 7d
+    Plan de trabajo                           :a2, 2026-01-05, 14d
+    Revisión bibliográfica                    :a3, 2026-01-05, 21d
+    Estado de la tecnología                   :a4, 2026-01-05, 21d
 
     section Diseño
-    Definición de requerimientos              :b1, 2026-09-15, 14d
-    Diseño conceptual de la solución          :b2, 2026-09-22, 14d
-    Selección de tecnologías y hardware       :b3, 2026-09-22, 14d
-    Arquitectura del sistema                  :b4, 2026-09-29, 14d
+    Definición de requerimientos              :b1, 2026-01-19, 14d
+    Diseño conceptual de la solución          :b2, 2026-01-26, 14d
+    Selección de tecnologías y hardware       :b3, 2026-01-26, 14d
+    Arquitectura del sistema                  :b4, 2026-02-02, 14d
 
     section Desarrollo
-    Desarrollo e integración del hardware     :c1, 2026-10-06, 28d
-    Adquisición y registro de señales         :c2, 2026-10-13, 21d
-    Procesamiento de señales                  :c3, 2026-10-20, 21d
-    Algoritmo de detección                    :c4, 2026-10-27, 28d
+    Desarrollo e integración del hardware     :c1, 2026-02-09, 28d
+    Adquisición y registro de señales         :c2, 2026-02-16, 21d
+    Procesamiento de señales                  :c3, 2026-02-23, 21d
+    Algoritmo de detección                    :c4, 2026-03-02, 28d
 
     section Alerta e integración
-    Sistema de alertas                        :d1, 2026-11-03, 21d
-    Integración del prototipo                 :d2, 2026-11-10, 21d
+    Sistema de alertas                        :d1, 2026-03-09, 21d
+    Integración del prototipo                 :d2, 2026-03-16, 21d
 
     section Validación
-    Pruebas técnicas                          :e1, 2026-11-17, 21d
-    Evaluación de desempeño y falsas alarmas  :e2, 2026-11-24, 14d
-    Optimización del prototipo                :e3, 2026-12-01, 14d
+    Pruebas técnicas                          :e1, 2026-03-23, 21d
+    Evaluación de desempeño y falsas alarmas  :e2, 2026-03-30, 14d
+    Optimización del prototipo                :e3, 2026-04-06, 14d
 
     section Cierre
-    Documentación y presentación final        :f1, 2026-11-24, 21d
+    Documentación y presentación final        :f1, 2026-03-30, 21d
+```
