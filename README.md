@@ -43,7 +43,7 @@
 gantt
     title Cronograma del proyecto
     dateFormat YYYY-MM-DD
-    axisFormat Semana %W
+    axisFormat       Semana %W
     tickInterval 1week
     todayMarker off
 
