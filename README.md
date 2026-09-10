@@ -44,6 +44,7 @@ gantt
     title Cronograma del proyecto
     dateFormat YYYY-MM-DD
     axisFormat %d/%m
+    todayMarker off
 
     section Investigación
     Definición de la problemática             :a1, 2026-09-01, 7d
