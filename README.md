@@ -39,7 +39,9 @@
 
 ## Diagrama de Gantt
 
+
 ```mermaid
+%%{init: {"themeCSS": ".grid .tick text { transform: translateX(-30px); }"}}%%
 gantt
     title Cronograma del proyecto
     dateFormat YYYY-MM-DD
