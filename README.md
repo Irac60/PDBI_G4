@@ -41,41 +41,66 @@
 
 
 ```mermaid
-%%{init: {"themeCSS": ".grid .tick text { transform: translateX(-30px); }"}}%%
+%%{init: {
+  "gantt": {
+    "barHeight": 34,
+    "barGap": 8,
+    "topPadding": 45,
+    "leftPadding": 170,
+    "fontSize": 10,
+    "sectionFontSize": 12
+  },
+  "themeCSS": "
+    .taskText {
+      font-size: 10px !important;
+      font-weight: 500 !important;
+    }
+    .taskTextOutsideRight,
+    .taskTextOutsideLeft {
+      font-size: 10px !important;
+    }
+    .grid .tick text {
+      transform: translateX(-30px);
+      font-size: 10px !important;
+    }
+  "
+}}%%
+
 gantt
     title Cronograma del proyecto
     dateFormat YYYY-MM-DD
-    axisFormat Semana %W　　
+    axisFormat Semana %W
     tickInterval 1week
+    weekday monday
     todayMarker off
 
     section Investigación
-    Definición de la problemática             :a1, 2026-01-05, 7d
-    Plan de trabajo                           :a2, 2026-01-05, 14d
-    Revisión bibliográfica                    :a3, 2026-01-05, 21d
-    Estado de la tecnología                   :a4, 2026-01-05, 21d
+    Problemática                         :a1, 2026-01-05, 7d
+    Plan de trabajo                      :a2, 2026-01-05, 14d
+    Revisión bibliográfica               :a3, 2026-01-05, 21d
+    Estado tecnológico                   :a4, 2026-01-05, 21d
 
     section Diseño
-    Definición de requerimientos              :b1, 2026-01-19, 14d
-    Diseño conceptual de la solución          :b2, 2026-01-26, 14d
-    Selección de tecnologías y hardware       :b3, 2026-01-26, 14d
-    Arquitectura del sistema                  :b4, 2026-02-02, 14d
+    Requerimientos                       :b1, 2026-01-19, 14d
+    Diseño conceptual                    :b2, 2026-01-26, 14d
+    Tecnología y hardware                :b3, 2026-01-26, 14d
+    Arquitectura del sistema             :b4, 2026-02-02, 14d
 
     section Desarrollo
-    Desarrollo e integración del hardware     :c1, 2026-02-09, 28d
-    Adquisición y registro de señales         :c2, 2026-02-16, 21d
-    Procesamiento de señales                  :c3, 2026-02-23, 21d
-    Algoritmo de detección                    :c4, 2026-03-02, 28d
+    Integración de hardware              :c1, 2026-02-09, 28d
+    Registro de señales                  :c2, 2026-02-16, 21d
+    Procesamiento de señales             :c3, 2026-02-23, 21d
+    Algoritmo de detección               :c4, 2026-03-02, 28d
 
     section Alerta e integración
-    Sistema de alertas                        :d1, 2026-03-09, 21d
-    Integración del prototipo                 :d2, 2026-03-16, 21d
+    Sistema de alertas                   :d1, 2026-03-09, 21d
+    Integración del prototipo            :d2, 2026-03-16, 21d
 
     section Validación
-    Pruebas técnicas                          :e1, 2026-03-23, 21d
-    Evaluación de desempeño y falsas alarmas  :e2, 2026-03-30, 14d
-    Optimización del prototipo                :e3, 2026-04-06, 14d
+    Pruebas técnicas                     :e1, 2026-03-23, 21d
+    Desempeño y falsas alarmas            :e2, 2026-03-30, 14d
+    Optimización                         :e3, 2026-04-06, 14d
 
     section Cierre
-    Documentación y presentación final        :f1, 2026-03-30, 21d
+    Documentación final                  :f1, 2026-03-30, 21d
 ```
