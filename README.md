@@ -40,8 +40,8 @@
 ## Diagrama de Gantt
 
 
-```mermaid
-%%{init: {
+```
+mermaid%%{init: {
   "gantt": {
     "barHeight": 34,
     "barGap": 8,
@@ -60,7 +60,7 @@
       font-size: 10px !important;
     }
     .grid .tick text {
-      transform: translateX(-30px);
+      transform: translateX(44px);
       font-size: 10px !important;
     }
   "
@@ -69,7 +69,7 @@
 gantt
     title Cronograma del proyecto
     dateFormat YYYY-MM-DD
-    axisFormat   Semana %W
+    axisFormat Semana %W
     tickInterval 1week
     weekday monday
     todayMarker off
@@ -92,7 +92,7 @@ gantt
     Procesamiento de señales             :c3, 2026-02-23, 21d
     Algoritmo de detección               :c4, 2026-03-02, 28d
 
-    section Alerta e integración
+    section Alerta e<br/>integración
     Sistema de alertas                   :d1, 2026-03-09, 21d
     Integración del prototipo            :d2, 2026-03-16, 21d
 
