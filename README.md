@@ -41,7 +41,8 @@
 
 
 ```
-mermaid%%{init: {
+mermaid%%
+{init: {
   "gantt": {
     "barHeight": 34,
     "barGap": 8,
