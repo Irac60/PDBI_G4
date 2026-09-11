@@ -40,39 +40,12 @@
 ## Diagrama de Gantt
 
 
-```
-mermaid%%
-{init: {
-  "gantt": {
-    "barHeight": 34,
-    "barGap": 8,
-    "topPadding": 45,
-    "leftPadding": 170,
-    "fontSize": 10,
-    "sectionFontSize": 12
-  },
-  "themeCSS": "
-    .taskText {
-      font-size: 10px !important;
-      font-weight: 500 !important;
-    }
-    .taskTextOutsideRight,
-    .taskTextOutsideLeft {
-      font-size: 10px !important;
-    }
-    .grid .tick text {
-      transform: translateX(44px);
-      font-size: 10px !important;
-    }
-  "
-}}%%
-
+```mermaid
 gantt
     title Cronograma del proyecto
     dateFormat YYYY-MM-DD
     axisFormat Semana %W
     tickInterval 1week
-    weekday monday
     todayMarker off
 
     section Investigación
@@ -93,13 +66,13 @@ gantt
     Procesamiento de señales             :c3, 2026-02-23, 21d
     Algoritmo de detección               :c4, 2026-03-02, 28d
 
-    section Alerta e<br/>integración
+    section Alerta e integración
     Sistema de alertas                   :d1, 2026-03-09, 21d
     Integración del prototipo            :d2, 2026-03-16, 21d
 
     section Validación
     Pruebas técnicas                     :e1, 2026-03-23, 21d
-    Desempeño y falsas alarmas            :e2, 2026-03-30, 14d
+    Desempeño y falsas alarmas           :e2, 2026-03-30, 14d
     Optimización                         :e3, 2026-04-06, 14d
 
     section Cierre
