@@ -1,0 +1,12 @@
+NORMALIZACIÓN seizureTimes — PIPELINE V2
+========================================================================
+Archivo: C:\Users\cesar\osd\pipeline_prototipo_v2\allData.json
+Respaldo: C:\Users\cesar\osd\pipeline_prototipo_v2\allData_antes_corregir_seizureTimes.json
+
+events_total: 240
+already_numeric: 120
+parsed_string: 0
+parsed_regex: 0
+missing: 120
+invalid: 0
+changed: 0

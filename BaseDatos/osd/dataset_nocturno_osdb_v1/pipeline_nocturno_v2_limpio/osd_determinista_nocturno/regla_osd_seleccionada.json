@@ -1,0 +1,43 @@
+{
+  "selected_using": "TRAIN only",
+  "target_sensitivity": 0.9,
+  "power_threshold": 0.05425036036486526,
+  "ratio_threshold": 0.436484300104836,
+  "required_consecutive": 3,
+  "train_metrics": {
+    "power_threshold": 0.05425036036486526,
+    "ratio_threshold": 0.436484300104836,
+    "required_consecutive": 3,
+    "tn": 10,
+    "fp": 0,
+    "fn": 3,
+    "tp": 8,
+    "sensitivity": 0.7272727272727273,
+    "specificity": 1.0,
+    "fpr": 0.0,
+    "precision": 1.0,
+    "balanced_accuracy": 0.8636363636363636,
+    "f1": 0.8421052631578948,
+    "f2": 0.7692307692307693,
+    "youden": 0.7272727272727273,
+    "median_alarm_time_s": 30.0
+  },
+  "validation_metrics": {
+    "power_threshold": 0.05425036036486526,
+    "ratio_threshold": 0.436484300104836,
+    "required_consecutive": 3,
+    "tn": 4,
+    "fp": 0,
+    "fn": 1,
+    "tp": 2,
+    "sensitivity": 0.6666666666666666,
+    "specificity": 1.0,
+    "fpr": 0.0,
+    "precision": 1.0,
+    "balanced_accuracy": 0.8333333333333333,
+    "f1": 0.8,
+    "f2": 0.7142857142857142,
+    "youden": 0.6666666666666665,
+    "median_alarm_time_s": 40.0
+  }
+}

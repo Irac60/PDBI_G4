@@ -1,0 +1,38 @@
+BÚSQUEDA DE CRISIS TÓNICO-CLÓNICAS NOCTURNAS EN OSDB
+==============================================================================
+
+CRITERIO
+SubType = Tonic-Clonic.
+Se exige evidencia explícita de sueño/cama/reposo en desc/subType.
+La hora del evento NO se usa como evidencia de sueño.
+
+Eventos totales en allSeizures CSV: 522
+Eventos Tonic-Clonic totales: 288
+Tonic-Clonic con evidencia explícita nocturna: 18
+Usuarios distintos: 3
+
+EVIDENCIA DE SUEÑO/REPOSO
+sleep_evidence
+sleep    15
+bed       3
+
+PRIMEROS 30 CANDIDATOS
+ eventId  userId            dataTime      subType sleep_evidence                                                                                                                                                                                                                                                      desc
+    8661      83 2022-07-17 05:56:48 Tonic-Clonic          sleep                                                                                                                                                                                                                         In sleep.  First one for 3 weeks.
+   12618      83 2022-08-29 05:17:22 Tonic-Clonic          sleep                                                                                                                                                                                                                                             Whilst asleep
+   12624      83 2022-08-29 07:53:34 Tonic-Clonic          sleep                                                                                                                                                               Whilst asleep, second one, can remember it a bit. Includes data from merged event(s): 12629
+   15039      83 2022-09-06 00:15:55 Tonic-Clonic          sleep                                                                                                                                                                                                                                             Whilst asleep
+   36812      39 2023-02-21 03:55:57 Tonic-Clonic          sleep                                                                                    Asleep, lying on front.  movement not visible on video.  snuffling sounds. Includes data from merged event(s): 36799. Includes data from merged event(s): 36799, 36872
+   90721      39 2023-10-21 06:19:16 Tonic-Clonic          sleep                                                                                                                                                                                                        rolled onto back from sleeping.  left arm flapping
+   98163      39 2023-11-26 07:12:25 Tonic-Clonic            bed A big one.  Got out of bed, fell over.   moved into recovery position after manual alarm raised. Stood up 07:11:25, circled a couple of times, fell onto back 07:11:57, rolled into recovery position 07:12:38. Includes data from merged event(s): 98167
+ 1175117      39 2026-04-23 03:25:11 Tonic-Clonic            bed                                                                                                                                                                      lying on front.   right arm tapping bed. Includes data from merged event(s): 1175127
+ 1333417    1643 2026-06-21 00:23:12 Tonic-Clonic          sleep                                                                                                                                                                                                                                    ? seizure during sleep
+ 1343957    1643 2026-06-26 02:58:22 Tonic-Clonic          sleep                                                                                                                            Asleep but assuming seizure. Includes data from merged event(s): 1343937. Includes data from merged event(s): 1343926, 1343937
+ 1343962    1643 2026-06-26 03:15:42 Tonic-Clonic          sleep                                                                                                                                                                                                                               asleep but assuming seizure
+ 1343971    1643 2026-06-26 03:32:17 Tonic-Clonic          sleep                                                                                                                                                                         asleep but assuming seizure. Includes data from merged event(s): 1343974, 1343999
+ 1351697    1643 2026-06-28 03:28:27 Tonic-Clonic          sleep                                                                                                                                Partially woken through my sleep. I don't remember much other than stiffening. Includes data from merged event(s): 1351708
+ 1351733    1643 2026-06-28 03:49:42 Tonic-Clonic          sleep                                                                                                                                                                                                            Seizure again through sleep. Only vague memory
+ 1354976    1643 2026-06-29 00:30:46 Tonic-Clonic          sleep                                                                                                                                   ?Trigger/commencement of seizure. asleep.  partially aware of surroundings  Includes data from merged event(s): 1354980
+ 1415490      39 2026-07-11 12:10:01 Tonic-Clonic            bed                                                                                                                                            on front, but left (watch) arm off side of bed so lots of movement.  paralysed down left hand side afterwards.
+ 1509852    1643 2026-07-27 16:21:30 Tonic-Clonic          sleep                                                                                                                                                      Clonic seizure 4.10pm during afternoon nap. I woke during it or just before. Lasted around 3 minutes
+ 1547218    1643 2026-08-05 13:48:00 Tonic-Clonic          sleep                                                                                                                                                                                                                       Clonic seizure during afternoon nap

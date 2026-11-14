@@ -1,0 +1,46 @@
+VERIFICACIÃ“N 125 MUESTRAS -> BÃšFER DE 750
+========================================================================
+
+InterpretaciÃ³n:
+- Cada fila de features contiene 125 muestras = 5 s.
+- DeepEpi usa bufferSeconds=30 a 25 Hz = 750 muestras.
+- Cada vector del modelo contiene los Ãºltimos 6 bloques.
+- El script detecta si resetAccBuf prellena o deja vacÃ­o el buffer.
+- Los primeros 5 datapoints contienen calentamiento/prefill cuando
+  el modelo puntÃºa desde el primer bloque.
+
+TRAIN
+Filas de 5 s: 604
+Eventos: 48
+Buffer prellenado al resetear: 750 muestras
+Warm-up reportado: 5 bloques
+Eventos sin ventana 30 s completamente real: 4
+Vectores producidos: 604
+Vectores 30 s completamente reales posibles: 372
+Vectores positivos: 435
+Vectores negativos: 169
+Longitudes: [750]
+
+VALIDATION
+Filas de 5 s: 264
+Eventos: 16
+Buffer prellenado al resetear: 750 muestras
+Warm-up reportado: 5 bloques
+Eventos sin ventana 30 s completamente real: 1
+Vectores producidos: 264
+Vectores 30 s completamente reales posibles: 186
+Vectores positivos: 207
+Vectores negativos: 57
+Longitudes: [750]
+
+TEST
+Filas de 5 s: 218
+Eventos: 16
+Buffer prellenado al resetear: 750 muestras
+Warm-up reportado: 5 bloques
+Eventos sin ventana 30 s completamente real: 2
+Vectores producidos: 218
+Vectores 30 s completamente reales posibles: 141
+Vectores positivos: 164
+Vectores negativos: 54
+Longitudes: [750]

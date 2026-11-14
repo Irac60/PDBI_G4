@@ -1,0 +1,525 @@
+## runSequence.py — pipeline overview and configuration
+
+This document describes the data processing steps implemented by `user_tools/nnTraining2/runSequence.py`, the configuration values the script expects, and example configuration snippets you can adapt.
+
+## Purpose
+
+`runSequence.py` implements the end-to-end toolchain used to prepare data, augment it, extract features, and train/test models for the Open Seizure Database neural-network training flow. The script is conservative: it only re-runs steps that are missing or explicitly requested via the `clean`/`rerun` control, so you can re-run the pipeline incrementally and avoid repeating expensive work.
+
+## High-level processing sequence
+
+When run in training mode (`train=True`), the script performs the following steps for each k-fold (or a single run when `kfold=1`):
+
+- Create an output folder for the run (under `outDir/<modelFname>/<run_number>/`, unless `rerun` is specified).
+- Selection and splitting:
+  - `selectData.selectData(...)` is called to create the master selected dataset (JSON). If missing, the script will re-generate selection and split files.
+  - `splitData.splitData(...)` creates train/test/val JSON files (one per fold when k-folding).
+- Flattening: convert the JSON OSDB event files to flattened CSVs via `flattenData.flattenOsdb(...)`. Files produced:
+  - train CSV (`trainDataFileCsv`) and test CSV (`testDataFileCsv`) per fold.
+- Augmentation: run `augmentData.augmentSeizureData(...)` to produce an augmented training CSV (`trainAugmentedFileCsv`).
+- Feature extraction: call `extractFeatures(...)` to compute epoch-level features for train and test CSVs. Produces `trainFeaturesFileCsv` and `testFeaturesFileCsv`.
+- Feature history: `add_feature_history(...)` is called to build history-feature versions (rolling windows / temporal history) of the feature files. These replace the raw features files for training.
+- Training and testing:
+  - For `modelType == "sklearn"`, `skTrainer.trainModel(...)` and `skTester.testModel(...)` are used.
+  - For `modelType == "tensorflow"`, `nnTrainer.trainModel(...)` and `nnTester.testModel(...)` are used.
+
+Notes:
+- The script checks for existence of each output file and will skip steps whose outputs are already present (unless you remove them or use `clean`).
+- `randomSeed` — central deterministic seed (top-level `randomSeed` in config, see `nnTrainer.py:15` `RANDOM_SEED_CONFIG_KEY`). If set to an integer (e.g. `42`), **all** stochastic aspects are seeded deterministically: Python `random`, NumPy, PyTorch (cpu/cuda), `PYTHONHASHSEED`, cuDNN (`deterministic=True`, `benchmark=False`, `use_deterministic_algorithms(True)`), `WeightedRandomSampler`/`DataLoader` generators, `userAug`/`noiseAug` augmentation, and `splitData` `StratifiedKFold`/`train_test_split` (`random_state`). If `null`/`None` or missing, the pipeline uses true random (non-deterministic) sampling. Set once at the top of `nnTrainer.py` and `runSequence.py` via `seed_all()` / `get_seed_from_config()` – update only the config value or that single section to change behaviour. Data preparation (selection, flattening, feature extraction) is deterministic; training sampling is deterministic only when `randomSeed` is set.
+
+## Command / launcher usage
+
+`runSequence.py` exposes a programmatic function `run_sequence(args)` which accepts a dictionary with keys matching the CLI options used by the surrounding tooling. Example invocation from Python:
+
+```python
+from user_tools.nnTraining2.runSequence import run_sequence
+
+args = {
+    'config': 'nnConfig.json',
+    'kfold': 5,
+    'rerun': 0,
+    'outDir': './output',
+    'train': True,
+    'test': False,
+    'clean': False,
+    'debug': True
+}
+
+run_sequence(args)
+```
+
+If you prefer to run the pipeline manually, you can create a small wrapper script that parses command-line arguments and calls `run_sequence(...)` (the repo does not ship a CLI wrapper inside `runSequence.py`).
+
+## Key configuration parameters
+
+`runSequence.py` reads the configuration JSON file (path provided in `args['config']`) using `libosd.configUtils.loadConfig(...)`. The configuration must supply several sections and keys used by the script and the modules it calls. Below are the most important keys and their meanings.
+
+Top-level sections and keys used by `runSequence.py`:
+
+- `dataFileNames` — filenames used by the pipeline (relative to fold output directories). Common keys referenced by the script:
+  - `allDataFileJson` — selected master JSON (produced by `selectData`).
+  - `testDataFileJson` — test split JSON filename.
+  - `trainDataFileJson` — train split JSON filename.
+  - `valDataFileJson` — validation split JSON filename.
+  - `testDataFileCsv` — flattened CSV filename for test data.
+  - `trainDataFileCsv` — flattened CSV filename for train data.
+  - `valDataFileCsv` — flattened CSV filename for val data.
+  - `trainAugmentedFileCsv` — augmented training CSV filename (produced by `augmentData`).
+  - `testBalancedFileCsv` — balanced test CSV filename (optional, produced by `augmentData.balanceTestData` if used).
+  - `trainFeaturesFileCsv` — feature CSV filename for training (produced by `extractFeatures`).
+  - `testFeaturesFileCsv` — feature CSV filename for testing.
+  - `trainFeaturesHistoryFileCsv` / `testFeaturesHistoryFileCsv` — history-augmented feature filenames used for training/testing after `add_feature_history`.
+
+- `modelConfig` — model settings and filenames:
+  - `modelType` — either `sklearn` or `tensorflow`. Controls which training/test modules are used.
+  - `modelFname` — model name / prefix used to create the output folder under `outDir`.
+
+- `randomSeed` (optional, integer or `null`) — central seed for **all** RNGs. `42` (or any int) → deterministic: seeds `random`, `numpy`, `torch`/`cuda`, `PYTHONHASHSEED`, cuDNN deterministic, `WeightedRandomSampler`/`DataLoader` generators, augmentation (`userAug`, `noiseAug`, `noiseAugNonSeizure`), and `splitData` stratification. `null`/`None` or absent → non-deterministic (random) sampling. Defined once near the top of `nnTrainer.py:15` (`seed_all()` / `make_torch_generator()`, `RANDOM_SEED_CONFIG_KEY="randomSeed"`) and reused in `runSequence.py`, `augmentData.py`, `splitData.py`, `subtype_weighting.py`.
+
+Additional knobs (used indirectly by other modules called from the pipeline):
+
+- `dataProcessing` — controls behavior of augmentation and feature extraction modules (examples):
+  - `noiseAugmentation` (bool)
+  - `noiseAugmentationFactor` (int)
+  - `noiseAugmentationValue` (float)
+  - `sampleRateAugmentation` (bool)
+  - `sampleRateAugmentationFactors` (list[float])
+  - `phaseAugmentation` (bool)
+  - `userAugmentation` (bool)
+  - `noiseAugmentationNonSeizure` (bool)
+  - `noiseAugmentationNonSeizureFactor` (int)
+  - `noiseAugmentationNonSeizureValue` (float)
+  - `noiseAugmentationNonSeizurePairs` (list[object])
+  - `oversample`, `undersample` (str or None): 'none', 'random', 'smote'
+  - `window`, `step` (for feature extraction windows)
+  - `highPassFreq`, `highPassOrder` (filtering)
+  - `worker_count`, `batch_size`, `stream_chunksize`, `progress_interval` (performance tuning for streaming/multiprocessing in `extractFeatures` and similar)
+
+Refer to the individual module docs for more keys used by `flattenData`, `augmentData`, `extractFeatures`, and the trainers.
+
+## Minimal example `nnConfig.json`
+
+Below is a compact example config that demonstrates the main sections used by `runSequence.py`. Adapt file names and paths to your environment.
+
+```json
+{
+  "dataFileNames": {
+    "allDataFileJson": "all_data.json",
+    "testDataFileJson": "test_split.json",
+    "trainDataFileJson": "train_split.json",
+    "valDataFileJson": "val_split.json",
+    "testDataFileCsv": "test_flat.csv",
+    "trainDataFileCsv": "train_flat.csv",
+    "valDataFileCsv": "val_flat.csv",
+    "trainAugmentedFileCsv": "train_augmented.csv",
+    "trainFeaturesFileCsv": "train_features.csv",
+    "testFeaturesFileCsv": "test_features.csv",
+    "trainFeaturesHistoryFileCsv": "train_features_hist.csv",
+    "testFeaturesHistoryFileCsv": "test_features_hist.csv",
+    "testBalancedFileCsv": "test_balanced.csv"
+  },
+  "modelConfig": {
+    "modelType": "sklearn",
+    "modelFname": "training"
+  },
+  "randomSeed": 42,
+  "dataProcessing": {
+    "noiseAugmentation": true,
+    "noiseAugmentationFactor": 2,
+    "noiseAugmentationValue": 0.05,
+    "sampleRateAugmentation": true,
+    "sampleRateAugmentationFactors": [0.8, 1.2],
+    "phaseAugmentation": true,
+    "userAugmentation": false,
+    "noiseAugmentationNonSeizure": true,
+    "noiseAugmentationNonSeizureFactor": 1,
+    "noiseAugmentationNonSeizureValue": 0.05,
+    "noiseAugmentationNonSeizurePairs": [
+      {"type": 0, "subType": "Check"},
+      {"type": 0, "subType": "Unknown"}
+    ],
+    "oversample": "random",
+    "undersample": "none",
+    "window": 125,
+    "step": 125,
+    "worker_count": 4,
+    "batch_size": 1000,
+    "stream_chunksize": 20000
+  }
+}
+```
+
+## Output layout
+
+When a run is created the script writes outputs under `outDir/<modelFname>/<run_number>/`. For k-fold experiments it writes each fold under `.../<run_number>/foldN/` and places the per-fold CSVs and model artifacts there. Typical files produced per fold:
+
+- `train_flat.csv`, `test_flat.csv` — flattened train/test CSVs
+- `train_augmented.csv` — augmented training CSV
+- `train_features.csv`, `test_features.csv` — extracted features (or their history variants)
+- model artifacts and plots: e.g. `<modelFname>.keras`, `<modelFname>_confusion.png`, `<modelFname>_training.png`, etc.
+
+The script also produces a k-fold summary (`kfold_summary.txt` and `kfold_summary.json`) in the run folder.
+
+## Debugging and re-run control
+
+- `clean=True` will delete many of the output files listed in the script and exit.
+- `rerun` allows re-using or overwriting a specific run folder instead of creating a new sequential one.
+- `debug=True` prints additional diagnostic messages.
+
+## Data processing options (detailed)
+
+The `dataProcessing` section in the config controls augmentation, feature extraction, streaming and performance knobs used across the pipeline. Below are the keys that the tools read, their meanings, types and default values (taken from `user_tools/nnTraining2/nnConfig.json` where available).
+
+- `nHistory` (int, default: 5)
+  - Number of historical feature steps to include when building feature-history CSVs (used by `addFeatureHistory`).
+
+- `highPassFreq` (float, default: 0.5)
+  - Cutoff frequency (Hz) for high-pass filtering applied to accelerometer time series prior to feature extraction.
+
+- `highPassOrder` (int, default: 2)
+  - Filter order for the Butterworth high-pass filter.
+
+- `dcNormalisation` (bool, default: false)
+  - Applied by `flattenData` when writing the flattened CSV (see "DC
+    normalisation" section below). Rescales old surrogate-magnitude events
+    (still level above threshold) back to a ~1000 mg still level, matching
+    modern data. Modern data passes through untouched, so **no on-device
+    change is needed** — the production app already supplies ~1000 mg-offset
+    data.
+
+- `dcNormalisationSurrogateThreshold` (float, default: 1100.0)
+  - Event still level (lower-quartile of per-datapoint M means, mg) above
+    which the surrogate rescale triggers. Kept at 1100 mg rather than exactly
+    1000 mg so normal device-bias variation around 1000 mg is never rescaled.
+
+- `window` (int, default: 125)
+  - Number of accelerometer samples per epoch/window used for feature extraction (125 = 5s at 25 Hz).
+
+- `step` (int, default: same as `window`)
+  - Step size (samples) between successive epochs; smaller than `window` produces overlapping epochs.
+
+- `oversample` (str, default: "none")
+  - Event-level oversampling strategy. Supported values: `"none"`, `"random"`, `"smote"` (SMOTE falls back to random for single-feature event ids).
+
+- `undersample` (str, default: "random")
+  - Event-level undersampling strategy. Supported values: `"none"`, `"random"`.
+
+- `worker_count` (int or null)
+  - Number of worker processes for multiprocessing in streaming extraction. If `null` the code uses CPU count - 1.
+
+- `batch_size` (int, default: 1000)
+  - Number of feature rows to buffer before writing a batch to disk in streaming mode.
+
+- `stream_chunksize` (int, default: 20000)
+  - Number of CSV rows to read per pandas chunk when streaming flattened CSVs by event.
+
+- `stream_low_memory` (bool, default: false)
+  - Forwarded to `pandas.read_csv(..., low_memory=...)` when loading streamed temporary outputs; tune if you see dtype warnings.
+
+- `stream_dtype_map` (dict or null)
+  - Optional dtype mapping passed to `pandas.read_csv` for more reliable streaming reads and to avoid mixed-type inference.
+
+- `postprocess_chunksize` (int, default: 200000)
+  - Rows per chunk when post-processing the streamed temp features file
+    (column ordering, header-row cleanup, type coercion) straight to the final
+    file. Peak memory stays O(chunk) instead of ~2x the file size, so this is
+    the knob to lower if the "post-processing" stage swaps. Throughput is
+    typically ~25-30k rows/s; output is byte-identical to the old full-frame
+    load regardless of chunk size.
+
+- `noiseAugmentation` (bool, default: false)
+  - Enable additive Gaussian noise augmentation on seizure rows.
+
+- `noiseAugmentationFactor` (int, default: 20)
+  - Number of noisy copies to create per seizure row when `noiseAugmentation` is enabled.
+
+- `noiseAugmentationValue` (float, default: 30.0)
+  - Standard deviation (same units as accelerometer columns) of the Gaussian noise added.
+
+- `sampleRateAugmentation` (bool, default: false)
+  - Enable event-level sample-rate augmentation for seizure events.
+  - For each seizure event, acceleration rows are concatenated in time order, resampled to a new effective sample density, and rebuilt into rows of 125 samples.
+
+- `sampleRateAugmentationFactors` (list[float], default: [])
+  - Multiplicative factors used by sample-rate augmentation.
+  - Values `< 1.0` compress the effective sample density, values `> 1.0` stretch it.
+  - Example: `[0.8, 1.2]` creates two synthetic variants per seizure event.
+
+- `phaseAugmentation` (bool, default: false)
+  - Enable phase (temporal shift) augmentation which constructs sliding windows from adjacent rows within an event.
+
+- `userAugmentation` (bool, default: false)
+  - Enable user-level resampling such that seizure samples are oversampled to balance user contributions.
+
+- `noiseAugmentationNonSeizure` (bool, default: false)
+  - Enable additive Gaussian noise augmentation for selected non-seizure events.
+  - Hard-negative mining: use `noiseAugmentationNonSeizurePairs` to up-sample the
+    non-seizure subtypes that dominate the false-alarm table. Note that with the
+    class-balanced subtype sampler (`useSubtypeWeighting`) this adds
+    *within-negative* emphasis (N noisy copies = N× sampling mass for that
+    event); it does not change the overall seizure:non-seizure batch ratio,
+    which the sampler pins at ~50/50.
+
+- `noiseAugmentationNonSeizureFactor` (int, default: 0)
+  - Number of noisy duplicates to create for each selected non-seizure event.
+
+- `noiseAugmentationNonSeizureValue` (float, default: same as `noiseAugmentationValue`)
+  - Standard deviation of Gaussian noise used for selected non-seizure events.
+
+- `noiseAugmentationNonSeizurePairs` (list[object], default: [])
+  - Selector list for non-seizure augmentation; each selector is a type/subType pair.
+  - Matching is event-level and case-insensitive for `subType`.
+  - Example:
+
+```json
+"noiseAugmentationNonSeizurePairs": [
+  {"type": 0, "subType": "Check"},
+  {"type": 0, "subType": "Unknown"}
+]
+```
+
+  - Notes:
+    - An empty selector list means no non-seizure augmentation is applied.
+    - `type` supports numeric or string values; `subType` can also be passed as `value` for compatibility.
+
+- `splitTestTrainByEvent` (bool, default: true)
+  - When `true` the split into train/test is performed at the event-level so that datapoints from the same event don't appear in both sets.
+
+- `accSdThreshold` (float, default: 0.0)
+  - Threshold applied to accelerometer standard deviation for event filtering (small values remove very quiet events).
+
+- `testProp`, `validationProp` (float)
+  - Proportion of events reserved for test/validation when splitting (e.g. 0.3 for 30% test).
+
+- `seizureTimeRange` (list of two ints, default: [-20, 20])
+  - Time window (seconds) around labelled seizure time used by some selection or labeling code.
+
+- `features` (list of strings)
+  - Subset of available calculated features to include in training/testing. The pipeline extracts a comprehensive set of features but only passes the selected names downstream. See the `Available features` section below.
+
+- `progress_interval` (int, default: 100)
+  - How often (in events) to print progress updates when streaming/multiprocessing.
+
+
+### Performance tuning recommendations
+
+- For moderate datasets (<100k rows) the default in-memory path (no streaming) is convenient. For larger flattened CSVs enable streaming/multiprocessing via `extractFeatures` and set `worker_count` to a sensible number (cpu_count - 1 is a good start).
+- Increase `batch_size` to amortise disk writes but watch memory use. Decrease `stream_chunksize` to reduce memory spikes when pandas reads large chunks.
+- Provide a `stream_dtype_map` when you know column dtypes up-front (prevents mixed-type columns and speeds up `read_csv`).
+
+
+## Available features (calculated by accelFeatures)
+
+The feature extractor (`accelFeatures.calculate_epoch_features`) computes both time-domain and frequency-domain features for each axis (x, y, z) and the acceleration magnitude plus some metadata features. The complete list of available feature names (as found in `user_tools/nnTraining2/nnConfig.json` `_all_features`) is:
+
+```
+osdSpecPower
+osdRoiPower
+specPower
+roiPower
+activity_count_magnitude
+mean_magnitude
+std_magnitude
+skewness_magnitude
+kurtosis_magnitude
+zcr_magnitude
+mean_freq_magnitude
+entropy_magnitude
+total_power_magnitude_osdRoi
+peak_psd_magnitude_osdRoi
+total_power_magnitude_osdSpec
+peak_psd_magnitude_osdSpec
+total_power_magnitude_osdFlap
+peak_psd_magnitude_osdFlap
+total_power_magnitude_seizure_main
+peak_psd_magnitude_seizure_main
+total_power_magnitude_initial_clonus
+peak_psd_magnitude_initial_clonus
+total_power_magnitude_late_clonus
+peak_psd_magnitude_late_clonus
+total_power_magnitude_1-3Hz
+peak_psd_magnitude_1-3Hz
+total_power_magnitude_2-4Hz
+peak_psd_magnitude_2-4Hz
+total_power_magnitude_3-5Hz
+peak_psd_magnitude_3-5Hz
+total_power_magnitude_4-6Hz
+peak_psd_magnitude_4-6Hz
+total_power_magnitude_5-7Hz
+peak_psd_magnitude_5-7Hz
+total_power_magnitude_6-8Hz
+peak_psd_magnitude_6-8Hz
+total_power_magnitude_7-9Hz
+peak_psd_magnitude_7-9Hz
+total_power_magnitude_8-10Hz
+peak_psd_magnitude_8-10Hz
+hr
+o2sat
+specPower
+roiPower
+acc_magnitude
+meanLineLengthMag
+powerMag_0.5-2.5
+powerMag_2.5-4.5
+powerMag_4.5-6.5
+powerMag_6.5-8.5
+powerMag_8.5-10.5
+powerMag_10.5-12.5
+meanLineLengthX
+powerX_0.5-2.5
+powerX_2.5-4.5
+powerX_4.5-6.5
+powerX_6.5-8.5
+powerX_8.5-10.5
+powerX_10.5-12.5
+meanLineLengthY
+powerY_0.5-2.5
+powerY_2.5-4.5
+powerY_4.5-6.5
+powerY_6.5-8.5
+powerY_8.5-10.5
+powerY_10.5-12.5
+meanLineLengthZ
+powerZ_0.5-2.5
+powerZ_2.5-4.5
+powerZ_4.5-6.5
+powerZ_6.5-8.5
+powerZ_8.5-10.5
+powerZ_10.5-12.5
+```
+
+Note: feature names include both per-axis aggregated statistics (mean, std, skewness, kurtosis, zero-crossing rate, mean spectral frequency, entropy) and band-specific PSD totals/peaks for multiple named bands (e.g. `seizure_main`, `initial_clonus`, `1-3Hz`, etc.).
+
+To reduce model input dimensionality list only the `features` you want to use in the config (the example `nnConfig.json` includes a recommended compact set). The trainers (`skTrainer`/`nnTrainer`) select feature columns according to that list.
+
+
+## Implementation notes and pointers
+
+- `runSequence.py` is a coordinating script: most heavy lifting is delegated to these modules in `user_tools/nnTraining2`:
+  - `selectData` — selects events and produces the master JSON
+  - `splitData` — splits the master JSON into train/test/val JSONs
+  - `flattenData` — flattens JSON -> CSV (per-event rows expanded to accelerometer samples columns)
+  - `augmentData` — applies phase/noise/user augmentation to flattened CSVs
+  - `extractFeatures` — streams flattened CSVs, computes epoch features, supports multiprocessing and batched writes
+  - `addFeatureHistory` — builds history-enriched feature CSVs
+
+- If you plan to convert everything to streaming mode (as discussed in code review), focus first on `flattenData` output shape and column names so that downstream streaming readers (for augmentation and feature extraction) can rely on constant schemas.
+
+## DC normalisation (surrogate-magnitude rescale to 1000 mg)
+
+Enabled with `dataProcessing.dcNormalisation=true`; applied by `flattenData`
+per event before rows are written, so every downstream stage (features,
+augmentation, training, testing) sees corrected data. Single step:
+
+**Surrogate-magnitude rescale.** Early seizure-detector firmware reported a
+surrogate magnitude (|x|+|y|+|z|) instead of the true vector magnitude to
+save on-device computation. Its still level depends on device orientation
+(1000..~1732 mg rather than ~1000 mg), and a few recordings use different
+unit scalings entirely (e.g. raw LSB with g=8192). When the event still level
+— the lower quartile (Q1) of per-datapoint M means — exceeds
+`dcNormalisationSurrogateThreshold` (default 1100 mg) AND even the quietest
+datapoint sits above 1050 mg, the whole event's M columns are scaled by
+1000/Q1. Q1 is used rather than the median because movement raises
+datapoint means: the median lands on active datapoints in mostly-active
+true-magnitude events and false-triggers, while the still level lives at the
+low end (surrogate still levels are elevated in every datapoint, so Q1 still
+detects them). Q1 is robust to brief high-g transients, so **fall events are
+not rescaled or excluded** — only sustained elevated baselines are, and those
+are linear scalings that the rescale physically corrects. X/Y/Z are checked
+independently via their own vector magnitude (surrogate events typically
+carry no 3D data at all). Rescaled events are logged.
+
+Events already near 1000 mg (all modern true-magnitude data) pass through
+**untouched**, preserving the 1000 mg 1 g offset. There is deliberately **no**
+per-datapoint centring step (an earlier revision made every datapoint
+zero-mean, which forced a matching on-device mean subtraction — dropped as
+over-complicated since only the old surrogate data actually needs fixing).
+
+**Deployment:** no on-device change is required. The exported model (.pte)
+expects the same ~1000 mg-offset magnitude data the production app already
+supplies; the surrogate rescale is a training-data correction only.
+
+Because the DC offset is preserved, `dcOffsetAugmentation` remains a useful
+complementary tool: it teaches the model invariance to absolute DC level
+(device bias) rather than being a no-op. The tester's
+`testBufferPrefill='stationary'` mode fills with 1000 milli-g
+(see `NnModel._stationary_fill_value`).
+
+Rationale, measurements and the full false-alarm investigation that led to
+this feature: see `FALSE_ALARM_INVESTIGATION.md` (note: that document
+describes the earlier zero-mean revision; the centring step and its
+on-device mean-subtraction requirement no longer apply).
+
+## Missing data (dropped and concatenated, never zero-filled)
+
+Missing accelerometer data is ignored and the next valid data concatenates
+onto what came before — exactly what the production device does. No
+configuration is needed; this is uniform pipeline behaviour:
+
+- **Whole-datapoint gaps:** `flattenData` writes no rows for missing spans
+  (datapoints without any accelerometer samples are skipped) and leaves a
+  `dataTime` discontinuity. The rolling buffer does NOT restart there:
+  `nnTrainer.df2trainingData` and `nnTester.testModel` keep appending, so the
+  first post-gap datapoint concatenates onto the pre-gap buffer content. This
+  matches the production device, which waits out the stall and appends the next
+  valid samples after what is already buffered — model windows therefore span
+  gaps identically at train, test and deploy time.
+- **Within-datapoint sample holes** (`None`/NaN inside a datapoint's 125
+  samples): the rolling-buffer models (`appendToAccBuf`/`appendToAccBuf3D`,
+  shared helpers `nnModel.valid_accel_samples_1d/_3d`) drop the missing samples
+  and append only valid ones. They are never replaced with 0 mg, which would
+  be non-physical for a resting ~1000 mg sensor and read as a violent transient.
+- **Augmentation** preserves missingness: per-row transforms (noise, DC offset)
+  let NaN propagate through untouched, while concatenation transforms
+  (sample-rate, phase) drop missing samples before resampling/windowing, so no
+  synthetic zeros enter the augmented set.
+- **Feature extraction** (`extractFeatures`, sklearn path) needs continuous
+  fixed windows for filtering, so it bridges short within-datapoint holes by
+  linear interpolation instead; whole-datapoint gaps are still left as
+  discontinuities. `accelFeatures` computes each epoch's statistics on valid
+  samples only. A wholly-missing axis (stale files without 3D) keeps the
+  legacy all-zeros series.
+
+## Rolling-buffer segments, pre-fill and warm-up masking
+
+Rolling-buffer models (e.g. the CNN-LSTM, 45 s buffer = 9 datapoints) accumulate
+samples in order. A **buffer segment** starts at each event boundary only. A
+dataTime gap (a missing-data span: `flattenData` never inserts synthetic filler
+rows, so the gap is visible as a `dataTime` jump within an event) does NOT
+start a segment and does NOT restart the buffer: the first post-gap datapoint
+concatenates onto the pre-gap buffer content, because the production device
+waits out the stall and keeps appending too. In training, post-gap rows
+therefore enter training normally (the buffer is already full); at test time
+there is no re-prefill and no warm-up masking after gaps.
+
+At test time the buffer is pre-filled at each segment start
+(`modelConfig.testBufferPrefill`):
+- `repeat` (default): tile the segment's first real datapoint (deterministic).
+- `noise`: Gaussian noise matched to the first datapoint's mean/SD, seeded per
+  event when the top-level `randomSeed` is set.
+- `stationary`: legacy flat fill at the stationary level — 1000 milli-g
+  (out-of-distribution for the model and prone to inflating start-of-segment
+  seizure probabilities).
+- `none`: no pre-fill; leading rows of each segment are dropped as in training.
+
+The leading datapoints of each segment whose model-input window still contains
+pre-fill are flagged (`df['is_warm']`, `NWarmDps` / `ModelPredictionMasked` /
+`MaxProbMasked` columns in `*_event_results.csv`) and **excluded from alarm
+decisions** — both the event rule (any datapoint ≥ threshold) and the
+production rule (3 consecutive ≥ threshold, which additionally cannot bridge
+masked regions) — as well as from alarm-latency detection. They are still
+scored, plotted and counted in datapoint-level metrics. Masked operating-point
+metrics (`*_masked` keys in `testResults.json`, masked threshold curves in
+`*_threshold_data*.json`) are reported alongside the standard ones; events with
+no non-warm datapoint are excluded from masked rates and counted
+(`n_events_excluded_masked`).
+
+## Troubleshooting
+
+- If a step is repeatedly skipped, inspect the target output file path in the run folder — the script will skip a step when the expected file already exists.
+- For reproducibility between runs, set `randomSeed` to an integer (e.g. `42`) in the configuration – this seeds all aspects via `nnTrainer.py:15` (`seed_all()`). Set `randomSeed` to `null` for true random sampling. `worker_count` >0 still respects the seed via `DataLoader` `generator` and `worker_init_fn`.
+- For very large datasets prefer the streaming/multiprocessing config knobs in `dataProcessing` (see `extractFeatures` docs in `user_tools/nnTraining2/extractFeatures.py`).
+
+## Contact
+
+If you need a tailored example config for a particular model type (`tensorflow` vs `sklearn`) or want me to convert the pipeline to always use streaming mode end-to-end, tell me which modules you'd like converted first and I will make a small, backward-compatible plan.

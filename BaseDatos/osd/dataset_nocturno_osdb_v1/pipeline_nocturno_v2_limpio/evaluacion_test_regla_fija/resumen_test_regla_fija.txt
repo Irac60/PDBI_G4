@@ -1,0 +1,39 @@
+EVALUACIÓN TEST — REGLA NOCTURNA FIJA
+==============================================================================
+
+IMPORTANTE
+Este resultado abre el conjunto TEST. Los parámetros NO se modificaron usando TEST.
+
+REGLA FIJA
+power_threshold: 0.05425036036486526
+ratio_threshold: 0.436484300104836
+required_consecutive: 2
+
+RESULTADOS TEST
+Eventos: 7
+Positivos: 3
+Negativos: 4
+TP: 3
+TN: 3
+FP: 1
+FN: 0
+Sensibilidad: 1.0
+Especificidad: 0.75
+FPR: 0.25
+Precisión: 0.75
+Balanced accuracy: 0.875
+Mediana tiempo de alarma detectadas (s): 55.0
+
+DETALLE POR EVENTO
+eventId  userId                                      typeStr  true_label  predicted_label  n_windows  positive_windows  longest_positive_run  alarm_time_from_first_window_s  mean_power_3_8  max_power_3_8  mean_ratio_3_8  max_ratio_3_8
+  36812      39                         Seizure/Tonic-Clonic           1                1         14                 5                     5                            55.0      145.554833    1213.864020        0.450992       0.652481
+1175117      39                         Seizure/Tonic-Clonic           1                1         54                18                     4                            85.0       46.810479     658.492417        0.427061       0.666799
+1351697    1643                         Seizure/Tonic-Clonic           1                1         39                23                    11                            10.0       12.220377     108.743442        0.486026       0.892439
+    401      39 False Alarm/Other (Please describe in notes)           0                0          7                 1                     1                             NaN        6.707387      42.130018        0.453829       0.707196
+    445      39 False Alarm/Other (Please describe in notes)           0                1          7                 2                     2                            25.0        0.058397       0.085666        0.413752       0.552657
+   5481      39 False Alarm/Other (Please describe in notes)           0                0          7                 0                     0                             NaN        8.761800      48.632635        0.271804       0.371683
+1632551    1643                            False Alarm/Other           0                0          7                 2                     1                             NaN        7.901378      54.980163        0.389801       0.466025
+
+INTERPRETACIÓN
+La regla mantiene un comportamiento prometedor en el TEST nocturno reservado.
+Puede congelarse como detector de movimiento sospechoso para el prototipo, no como diagnóstico clínico.

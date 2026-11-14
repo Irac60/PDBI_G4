@@ -1,0 +1,58 @@
+BÚSQUEDA DE NEGATIVOS NOCTURNOS EN OSDB
+==============================================================================
+
+CRITERIO
+Solo se aceptan eventos cuyo desc/subType contenga evidencia explícita de sueño, cama o reposo.
+La hora del evento NO se utiliza como evidencia de que la persona estaba dormida.
+Se excluyen por ahora caminar/correr, actividad diurna y eventos que describen despertar/levantarse.
+
+Eventos revisados en CSV: 19152
+Eventos con palabras de sueño/reposo: 317
+Candidatos nocturnos aceptados: 291
+Excluidos por actividad incompatible: 26
+
+CANDIDATOS POR ARCHIVO
+source_csv
+osdb_3min_falseAlarms.csv    291
+
+CANDIDATOS POR TIPO
+type
+False Alarm    291
+
+EVIDENCIA DE SUEÑO/REPOSO
+sleep_evidence
+sleep        211
+bed           50
+sleep;bed     28
+rest           2
+
+USUARIOS DISTINTOS
+21
+
+PRIMEROS 25 CANDIDATOS
+eventId  userId            dataTime        type                          subType sleep_evidence                                                          desc
+    401      39 2022-02-16 05:54:20 False Alarm Other (Please describe in notes)          sleep                                                      sleeping
+    406      39 2022-02-17 06:06:15 False Alarm Other (Please describe in notes)          sleep                                                      sleeping
+    413      39 2022-02-19 05:31:19 False Alarm Other (Please describe in notes)          sleep                                            sleeping (I think)
+    438      39 2022-02-20 21:01:13 False Alarm Other (Please describe in notes)          sleep                                                      sleeping
+    443      39 2022-02-20 23:23:56 False Alarm Other (Please describe in notes)          sleep                                                      sleeping
+    444      39 2022-02-20 23:29:38 False Alarm Other (Please describe in notes)          sleep                                                      sleeping
+    445      39 2022-02-20 23:41:22 False Alarm Other (Please describe in notes)          sleep                                                      sleeping
+    481      39 2022-02-21 20:38:22 False Alarm Other (Please describe in notes)          sleep                                                      sleeping
+    760      39 2022-03-06 05:40:20 False Alarm                              NaN          sleep                                                      sleeping
+    801      39 2022-03-10 20:42:03 False Alarm Other (Please describe in notes)          sleep                                                      sleeping
+    834      39 2022-03-12 06:57:54 False Alarm Other (Please describe in notes)          sleep                                                      sleeping
+   1008      39 2022-03-17 23:42:07 False Alarm Other (Please describe in notes)          sleep                                                      sleeping
+   1011      39 2022-03-18 19:27:04 False Alarm Other (Please describe in notes)          sleep                                                      sleeping
+   1869      39 2022-03-26 23:07:32 False Alarm Other (Please describe in notes)          sleep                                                      sleeping
+   1930      39 2022-04-03 05:25:51 False Alarm Other (Please describe in notes)          sleep                                                      sleeping
+   1931      39 2022-04-03 05:35:27 False Alarm Other (Please describe in notes)          sleep                                                      sleeping
+   5038      39 2022-04-14 03:22:10 False Alarm Other (Please describe in notes)          sleep                                                      sleeping
+   5134      45 2022-04-23 01:51:13 False Alarm Other (Please describe in notes)          sleep                                      twitches whilst sleeping
+   5481      39 2022-05-08 21:42:32 False Alarm Other (Please describe in notes)          sleep                                                      sleeping
+   5487      39 2022-05-09 04:35:59 False Alarm Other (Please describe in notes)          sleep                                                      sleeping
+   5603      39 2022-05-20 03:33:34 False Alarm Other (Please describe in notes)          sleep                                                      sleeping
+   5718      45 2022-05-29 21:03:46 False Alarm                          Unknown          sleep                                               sleep twitching
+   6453      39 2022-06-06 06:24:35 False Alarm Other (Please describe in notes)          sleep                                      scratching head in sleep
+   6561      39 2022-06-09 17:47:30 False Alarm Other (Please describe in notes)          sleep sleeping, fidgeting. Includes data from merged event(s): 6563
+   6563      39 2022-06-09 17:48:21 False Alarm Other (Please describe in notes)          sleep                                          sleeping.  fidgeting

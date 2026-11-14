@@ -1,0 +1,57 @@
+DIVISIÓN OSDB POR EVENTO
+========================================================================
+
+Entrada: C:\Users\cesar\osd\pipeline_prototipo\allData.csv
+Semilla: 42
+
+PROPORCIONES SOLICITADAS
+Train: 0.600
+Validation: 0.200
+Test: 0.200
+
+RESULTADOS
+
+TRAIN
+Filas: 604
+Eventos: 48
+Eventos positivos: 24
+Eventos negativos: 24
+Filas positivas: 435
+Filas negativas: 169
+Usuarios: 14
+Filas completas M000..M124: 604
+
+VALIDATION
+Filas: 264
+Eventos: 16
+Eventos positivos: 8
+Eventos negativos: 8
+Filas positivas: 207
+Filas negativas: 57
+Usuarios: 7
+Filas completas M000..M124: 264
+
+TEST
+Filas: 218
+Eventos: 16
+Eventos positivos: 8
+Eventos negativos: 8
+Filas positivas: 164
+Filas negativas: 54
+Usuarios: 8
+Filas completas M000..M124: 218
+
+CONTROL DE FUGA DE EVENTOS
+Train ∩ Validation: 0
+Train ∩ Test: 0
+Validation ∩ Test: 0
+
+SUPERPOSICIÓN DE USUARIOS
+(Informativa: esta división es por evento, no por usuario.)
+Train ∩ Validation: 4
+Train ∩ Test: 5
+Validation ∩ Test: 2
+
+VEREDICTO
+Fuga de eventId: NO
+Eventos recuperados: 80/80

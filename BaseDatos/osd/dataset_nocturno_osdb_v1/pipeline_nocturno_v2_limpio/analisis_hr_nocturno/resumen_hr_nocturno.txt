@@ -1,0 +1,44 @@
+COBERTURA DE HR / SpO2 — DATASET NOCTURNO
+==============================================================================
+
+Este análisis usa TRAIN + VALIDATION.
+TEST permanece cerrado.
+
+Eventos analizados: 28
+Eventos con al menos un HR válido: 26
+Eventos con >=80 % de datapoints con HR válido: 21
+Eventos con algún SpO2 válido: 0
+
+COBERTURA POR SPLIT Y CLASE
+     split  label  events  events_with_hr  events_hr_fullish  median_hr_fraction  median_hr_range  events_with_spo2
+     train      0      10               9                  8            1.000000             12.0                 0
+     train      1      11              11                 10            1.000000             28.0                 0
+validation      0       4               4                  1            0.269209             16.5                 0
+validation      1       3               2                  2            1.000000             14.5                 0
+
+WARNING k=2
+Eventos que activan WARNING: 16
+Eventos WARNING con al menos un HR válido: 15
+
+DETALLE WARNING + HR
+     split  eventId_warning  true_label  predicted_label  n_windows  longest_positive_run  hr_valid_count  hr_valid_fraction  hr_first  hr_last  hr_min  hr_max  hr_range  spo2_valid_count
+     train            11278           0                1          5                     2              23           1.000000      67.0     68.0    60.0    69.0       9.0                 0
+     train            12144           0                1          5                     2              25           1.000000      75.0     68.0    59.0    75.0      16.0                 0
+     train            12498           0                1          7                     2              27           1.000000      67.0     66.0    63.0    72.0       9.0                 0
+     train          1333417           1                1         13                     7              35           1.000000      73.0     67.0    67.0    82.0      15.0                 0
+     train          1343957           1                1         31                     7              81           1.000000      81.0     74.0    71.0    99.0      28.0                 0
+     train          1343962           1                1          5                     3              35           1.000000      72.0     72.0    67.0    82.0      15.0                 0
+     train          1343971           1                1         64                     4              80           1.000000      86.0     85.0    68.0    96.0      28.0                 0
+     train          1351733           1                1         18                     3              35           1.000000      69.0     90.0    65.0    96.0      31.0                 0
+     train          1354976           1                1         54                     3              70           1.000000      63.0     86.0    63.0    90.0      27.0                 0
+     train             6453           0                1          7                     2               3           0.103448      75.0     73.0    72.0    75.0       3.0                 0
+     train             8661           1                1          3                     3              25           1.000000      70.0    105.0    70.0   127.0      57.0                 0
+     train            90721           1                1         12                     3              12           0.400000      70.0    117.0    70.0   118.0      48.0                 0
+     train             9607           0                1          5                     2              46           1.000000      64.0     69.0    63.0    74.0      11.0                 0
+validation            12624           1                1         21                    11              34           1.000000      75.0     86.0    74.0    90.0      16.0                 0
+validation          1415490           1                1         14                     2               0           0.000000       NaN      NaN     NaN     NaN       NaN                 0
+validation          1509852           1                1         19                    11              24           1.000000      81.0     76.0    69.0    82.0      13.0                 0
+
+DECISIÓN ORIENTATIVA
+La cobertura de HR parece suficiente para intentar una regla de corroboración sobre TRAIN y evaluarla después en VALIDATION.
+El siguiente paso será estudiar cambio relativo de HR, no un valor absoluto fijo.

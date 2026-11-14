@@ -1,0 +1,60 @@
+<html>
+  <head>
+    <meta name="viewport"
+	  content="width=device-width, initial-scale=1, shrink-to-fit=no">    
+    <title>Open Seizure Database Events Summary</title>
+    <script src="js/jquery-3.6.0.min.js"></script>
+    <script src="js/popper.min.js"></script>
+    <script src="js/bootstrap.bundle.min.js"></script>
+    <link rel="stylesheet" href="css/bootstrap.min.css">
+    <style>
+      table.table { width:auto; }
+    </style>
+  </head>
+  
+  <body>
+    <div class="page-header">
+      <h1>Open Seizure Database Events Summary</h1>
+    </div>
+    <nav class="navbar navbar-expand-lg navbar-light bg-light">
+      <a class="navbar-brand" href="#">OpenSeizureDetector</a>      
+      <div class="collapse navbar-collapse" id="navbarSupportedContent">
+	<ul class="navbar-nav mr-auto">
+	  {% for eventType in data.events %}
+	  <li class="nav-item active">
+	    <a class="nav-link" href="#{{ eventType }}">{{ eventType }}</a>
+	  </li>
+	  {% endfor %}
+	</ul>
+      </div>
+    </nav>
+    {% for eventType in data.events %}
+    <h2 id="{{ eventType }}">{{ eventType }}</h2>
+    <table class="table table-bordered table-sm">
+      <tr>
+	<th>Event Id</th><th>Date</th><th>UserId</th>
+	<th>Type</th><th>subType</th>
+      </tr>
+      {% for eventObj in data.events[eventType] %}
+      <tr>
+	<td rowspan=2><a href='{{ eventObj.url }}'>{{ eventObj.id }}</a></td>
+	<td rowspan=2>{{ eventObj.dataTime }}</td>
+	<td>{{ eventObj.userId }}</td>
+	<td>{{ eventObj.type }}</td>
+	<td>{{ eventObj.subType }}</td>
+	<td><img width=100px src="Event_{{eventObj.id}}_summary/rawData.png">
+	<td rowspan=2><a href='{{ eventObj.url }}'>summary</a></td>
+      </tr>
+      <tr>
+	<td colspan=3>{{ eventObj.desc }}</td>
+	<td>{{ eventObj.nDataPoints}} / {{ eventObj.nDpGaps }} / {{ eventObj.nDpExtras }} </td>
+      </tr>
+      {% endfor %}
+    </table>
+    {% endfor %}
+
+
+    <p>This page was generated at {{ data.pageDateStr }}.
+    </p>
+  </body>
+</html>

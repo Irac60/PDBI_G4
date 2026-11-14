@@ -1,0 +1,17 @@
+imblearn
+jsbeautifier
+jinja2
+matplotlib
+pydot
+pydotplus
+numpy
+pandas
+python-dateutil
+requests
+scikit-learn
+tabulate
+seaborn
+fpdf
+pytest
+graphviz
+reportlab

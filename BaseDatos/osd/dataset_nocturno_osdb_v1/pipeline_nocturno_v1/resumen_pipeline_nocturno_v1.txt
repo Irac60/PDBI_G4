@@ -1,0 +1,59 @@
+PIPELINE NOCTURNO OSDB V1
+==============================================================================
+
+ALCANCE
+Detector limitado a dormido/descansando. Split por EVENTO, no por usuario.
+Solo hay 3 usuarios positivos, por lo que esta división es adecuada para prueba de concepto, no para estimar generalización a usuarios nuevos.
+
+APLANADO
+Eventos originales: 35
+Eventos recuperados: 35
+Eventos positivos recuperados: 17
+Eventos negativos recuperados: 18
+Filas/ventanas totales: 490
+Eventos perdidos tras aplanado: ninguno
+
+TRAIN
+Filas: 286
+Eventos: 21
+Positivos: 10
+Negativos: 11
+Filas positivas: 216
+Filas negativas: 70
+Usuarios: 3
+
+VALIDATION
+Filas: 63
+Eventos: 7
+Positivos: 3
+Negativos: 4
+Filas positivas: 35
+Filas negativas: 28
+Usuarios: 3
+
+TEST
+Filas: 141
+Eventos: 7
+Positivos: 4
+Negativos: 3
+Filas positivas: 122
+Filas negativas: 19
+Usuarios: 3
+
+FUGA DE eventId
+Train ∩ Validation: 0
+Train ∩ Test: 0
+Validation ∩ Test: 0
+
+SUPERPOSICIÓN DE userId (INFORMATIVA)
+Train ∩ Validation: 3
+Train ∩ Test: 3
+Validation ∩ Test: 3
+
+VEREDICTO
+Fuga de eventId: NO
+TEST queda reservado.
+No interpretar este split como validación independiente por paciente porque existe superposición de usuarios.
+
+SIGUIENTE PASO
+Entrenar únicamente con TRAIN y ajustar únicamente con VALIDATION. TEST permanecerá cerrado.

@@ -1,0 +1,128 @@
+#!/usr/bin/env python
+
+
+'''
+rfModel.py - Random Forest Model Class for Sklearn
+
+This file defines the RfModel class which is used to create and manage a Random Forest model using the Sklearn library.
+
+ConfigObj Usage:
+    configObj is expected to be a dictionary containing model parameters:
+        - 'classWeights': (optional) dictionary mapping class labels to weights, e.g. {0: 1.0, 1: 2.0}
+        - 'n_estimators': (optional) number of trees in the forest (default: 100)
+        - 'max_depth': (optional) maximum depth of the trees (default: None)
+    Other configObj keys may be used for data directories, debug flags, etc.
+'''
+
+import os
+import joblib
+import sklearn
+import sklearn.utils.class_weight
+import sklearn.ensemble
+import numpy as np
+import matplotlib.pyplot as plt
+
+from user_tools.nnTraining2 import skModel
+
+
+class RfModel(skModel.SkModel):
+    def __init__(self, dataDir = '.', configObj=None, debug=False):
+        """
+        Initialize the RfModel object.
+        Args:
+            dataDir (str): Directory for saving/loading model files.
+            configObj (dict, optional): Configuration dictionary (see top-level comment).
+            debug (bool, optional): Enable debug output.
+        """
+        self.TAG = "rfModel.RfModel"
+        self.configObj = configObj
+        self.debug = debug
+        self.model = None
+        self.dataDir = dataDir
+        self.modelFnameRoot = 'rfModel'
+        self.modelFnameDefault = '%s.joblib' % self.modelFnameRoot
+
+        print("RfModel Constructor - configObj=", configObj)
+
+
+
+
+
+    def fit(self, xTrain, yTrain):
+        """
+        Train the Random Forest model using the provided training data.
+        Args:
+            xTrain: Training feature vectors (array-like).
+            yTrain: Training labels (array-like).
+
+        Uses configObj for model parameters:
+            - 'classWeights': (optional) dictionary mapping class labels to weights.
+            - 'n_estimators': (optional) number of trees in the forest.
+            - 'max_depth': (optional) maximum depth of the trees.
+        """
+        classWeights = None
+        # Get class weights from configObj if provided
+        if 'classWeights' in self.configObj:
+            classWeightsStr = self.configObj['classWeights']
+            classWeights = {int(k): v for k, v in classWeightsStr.items()}  
+        else:
+            print("%s: No class weights defined in configObj - using default weights" % self.TAG)
+            classWeights = sklearn.utils.class_weight.compute_class_weight(
+                'balanced', np.unique(yTrain), yTrain)
+
+        print("%s: Using class weights: %s" % (self.TAG, classWeights))
+
+        # Print training data statistics
+        print("\n%s: Training using %d seizure datapoints and %d false alarm datapoints"
+            % (self.TAG, np.count_nonzero(yTrain == 1),
+            np.count_nonzero(yTrain == 0)))
+
+        # Get model hyperparameters from configObj
+        n_estimators = self.configObj.get('n_estimators', 100)
+        max_depth = self.configObj.get('max_depth', None)
+
+        print("%s: Training using n_estimators=%d, max_depth=%s" % (self.TAG, n_estimators, str(max_depth)))
+        # Create the Random Forest model
+        self.model = sklearn.ensemble.RandomForestClassifier(
+            n_estimators=n_estimators,
+            max_depth=max_depth,
+            class_weight=classWeights,
+            random_state=42, n_jobs=12)
+
+        # Train the model
+        self.model.fit(xTrain, yTrain)
+
+        ###############################################
+        # Training Complete - now evaluate the model
+
+        # Calculate feature importances
+        print("%s: Calculating feature importances" % self.TAG)
+        feature_importances = self.model.feature_importances_
+        feature_names = xTrain.columns
+        feature_importance_dict = dict(zip(feature_names, feature_importances))
+        sorted_feature_importances = sorted(feature_importance_dict.items(), key=lambda x: x[1], reverse=True)
+        #print("Feature Importances:")
+        #for feature, importance in sorted_feature_importances:
+        #    print(f"{feature}: {importance:.4f}")
+
+        # Save feature importances to a file
+        feature_importance_fpath = os.path.join(self.dataDir, "%s_feature_importances.txt" % self.modelFnameRoot)
+        with open(feature_importance_fpath, 'w') as f:
+            f.write("Feature Importances:\n")
+            for feature, importance in sorted_feature_importances:
+                f.write(f"{feature}: {importance:.4f}\n")
+        print("%s: Feature importances saved to %s" % (self.TAG, feature_importance_fpath))
+
+        # Plot feature importances
+        plt.figure(figsize=(6,20))
+        plt.barh(range(len(feature_importances)), feature_importances, align='center')
+        plt.yticks(range(len(feature_importances)), feature_names)
+        plt.xlabel('Importance')
+        plt.title('Feature Importances')
+        plt.tight_layout()
+        fpath = os.path.join(self.dataDir, "%s_feature_importances.png" % self.modelFnameRoot)
+        print("%s: Saving feature importances plot to %s" % (self.TAG, fpath))
+        plt.savefig(fpath)
+        plt.close()
+
+

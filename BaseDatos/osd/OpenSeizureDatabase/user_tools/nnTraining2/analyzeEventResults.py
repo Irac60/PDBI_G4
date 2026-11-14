@@ -1,0 +1,1557 @@
+#!/usr/bin/env python3
+"""
+Post-processing script to analyze nnTester event results CSV files.
+
+Usage:
+    python3 analyzeEventResults.py <path_to_event_results.csv> [--output <output_dir>] [--alldata-json <path_to_allData.json>]
+
+This script generates:
+    - Analysis of TPR and FAR by user
+    - Analysis of TPR by seizure type
+    - Analysis of event types/subtypes contributing to false alarms
+    - Table of false negative results with details from allData.json
+    - Report with figures saved as PDF
+
+The --alldata-json parameter is optional. If not provided, the script will look for allData.json
+in the same directory as the event results CSV file.
+"""
+
+import argparse
+import os
+import fnmatch
+import json
+import textwrap
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from matplotlib.backends.backend_pdf import PdfPages
+import warnings
+warnings.filterwarnings('ignore')
+
+# NDA events are ~3 minutes long; estimate false alarms per day for real-world FAR
+NDA_EVENT_DURATION_MIN = 3.0
+NDA_EVENTS_PER_DAY = 24 * 60 / NDA_EVENT_DURATION_MIN  # 480
+
+def _is_nda_series(series):
+    """Return boolean mask where series value indicates NDA (case-insensitive)."""
+    return series.astype(str).str.strip().str.lower() == 'nda'
+
+def _fa_per_day(far):
+    """Estimate false alarms per 24h assuming each NDA event ≈ NDA_EVENT_DURATION_MIN minutes."""
+    try:
+        return float(far) * NDA_EVENTS_PER_DAY
+    except Exception:
+        return 0.0
+
+# Set style for better-looking plots
+sns.set_style("whitegrid")
+plt.rcParams['figure.figsize'] = (12, 6)
+
+
+def _add_intro_page(pdf, title, lines):
+    """Add a text-only introduction page to the PDF."""
+    fig, ax = plt.subplots(figsize=(11.7, 8.3))
+    ax.axis('off')
+    fig.suptitle(title, fontsize=18, fontweight='bold', y=0.96)
+    body = "\n".join(lines)
+    ax.text(0.03, 0.92, body, transform=ax.transAxes, va='top', ha='left', fontsize=11)
+    pdf.savefig(fig, bbox_inches='tight')
+    plt.close(fig)
+
+
+def _find_first_matching_file(output_dir, patterns):
+    """Return first file in output_dir matching any pattern, preferring lexical order."""
+    try:
+        candidates = sorted(os.listdir(output_dir))
+    except Exception:
+        return None
+
+    for pattern in patterns:
+        for name in candidates:
+            if fnmatch.fnmatch(name, pattern):
+                full_path = os.path.join(output_dir, name)
+                if os.path.isfile(full_path):
+                    return full_path
+    return None
+
+
+def _add_image_page(pdf, image_path, title, description_lines):
+    """Add an existing image to the PDF with a short description."""
+    if not image_path or not os.path.exists(image_path):
+        return False
+
+    fig, ax = plt.subplots(figsize=(11.7, 8.3))
+    ax.axis('off')
+    fig.suptitle(title, fontsize=15, fontweight='bold', y=0.97)
+
+    desc = "\n".join(description_lines)
+    fig.text(0.03, 0.91, desc, ha='left', va='top', fontsize=10)
+
+    img = plt.imread(image_path)
+    ax.imshow(img)
+    ax.set_position([0.05, 0.08, 0.90, 0.72])
+
+    pdf.savefig(fig, bbox_inches='tight')
+    plt.close(fig)
+    return True
+
+
+def load_event_results(csv_path):
+    """Load event results CSV file."""
+    if not os.path.exists(csv_path):
+        raise FileNotFoundError(f"Event results CSV not found: {csv_path}")
+    
+    df = pd.read_csv(csv_path)
+    df.attrs['source_csv_path'] = csv_path
+    print(f"Loaded {len(df)} events from {csv_path}")
+    print(f"Columns: {list(df.columns)}")
+    return df
+
+
+def load_alldata_json(json_path):
+    """Load allData.json file containing event metadata."""
+    if not os.path.exists(json_path):
+        print(f"Warning: allData.json not found: {json_path}")
+        return None
+    
+    try:
+        with open(json_path, 'r') as f:
+            data = json.load(f)
+        print(f"Loaded allData.json with {len(data)} events")
+        return data
+    except Exception as e:
+        print(f"Error loading allData.json: {e}")
+        return None
+
+
+def extract_false_negatives_details(df, alldata_list):
+    """Extract details for false negative results from allData.json.
+    
+    Returns a DataFrame with columns: EventID, UserID, DateTime, Type, SubType, Description
+    from allData.json, enriching the base false negatives data.
+    If alldata_list is None, returns empty DataFrame (CSV data will be used as fallback).
+    """
+    if alldata_list is None:
+        return pd.DataFrame()
+    
+    # Get false negatives from results
+    fn_df = df[(df['ActualLabel'] == 1) & (df['ModelPrediction'] == 0)].copy()
+    
+    if len(fn_df) == 0:
+        return pd.DataFrame()
+    
+    # Create a mapping from event IDs to metadata
+    event_metadata = {}
+    for event in alldata_list:
+        event_id = event.get('id') or (event.get('datapoints', [{}])[0].get('eventId') if event.get('datapoints') else None)
+        if event_id:
+            # Try to convert to int, but handle cases where it might be a string or mixed
+            try:
+                event_id_int = int(event_id)
+            except (ValueError, TypeError):
+                # If conversion fails, try to extract numeric part
+                try:
+                    event_id_int = int(str(event_id).rstrip('abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ'))
+                except (ValueError, TypeError):
+                    continue
+            
+            event_metadata[event_id_int] = {
+                'dataTime': event.get('dataTime', ''),
+                'type': event.get('type', ''),
+                'subType': event.get('subType', ''),
+                'userId': event.get('userId', ''),
+                'desc': event.get('desc', '')
+            }
+    
+    # Build false negatives details with enhanced metadata from allData.json
+    fn_details = []
+    for _, row in fn_df.iterrows():
+        try:
+            event_id = int(row['EventID']) if pd.notna(row['EventID']) else None
+        except (ValueError, TypeError):
+            continue
+        
+        if event_id and event_id in event_metadata:
+            metadata = event_metadata[event_id]
+            fn_details.append({
+                'EventID': event_id,
+                'UserID': metadata['userId'],
+                'DateTime': metadata['dataTime'],
+                'Type': metadata['type'],
+                'SubType': metadata['subType'],
+                'Description': metadata['desc']
+            })
+    
+    return pd.DataFrame(fn_details)
+
+
+def _extract_event_probabilities(row):
+    """Extract per-datapoint seizure probabilities from a row in an event results CSV."""
+    dp_columns = [col for col in row.index if isinstance(col, str) and col.lower().startswith('dp')]
+    if not dp_columns:
+        return np.array([], dtype=float)
+
+    ordered = []
+    for col in sorted(dp_columns, key=lambda c: int(c[2:]) if c[2:].isdigit() else 10**9):
+        value = row[col]
+        if pd.isna(value):
+            ordered.append(np.nan)
+        else:
+            try:
+                ordered.append(float(value))
+            except (TypeError, ValueError):
+                ordered.append(np.nan)
+    return np.asarray(ordered, dtype=float)
+
+
+def _three_consecutive_predictions(probabilities, threshold=0.5, consecutive_required=3):
+    """Return a binary event prediction based on a run of consecutive values >= threshold."""
+    probs = np.asarray(probabilities, dtype=float)
+    if probs.size == 0:
+        return 0
+
+    pred = np.zeros_like(probs, dtype=int)
+    run_length = 0
+    for i, p in enumerate(probs):
+        if pd.notna(p) and p >= threshold:
+            run_length += 1
+            if run_length >= consecutive_required:
+                pred[i] = 1
+        else:
+            run_length = 0
+
+    return int(pred.max())
+
+
+def summarize_production_metrics(df, threshold=0.5, consecutive_required=3):
+    """Summarize production-style event detection from per-datapoint probabilities."""
+    event_predictions = []
+    for _, row in df.iterrows():
+        probs = _extract_event_probabilities(row)
+        if probs.size == 0:
+            event_predictions.append(0)
+            continue
+        event_predictions.append(_three_consecutive_predictions(probs, threshold=threshold, consecutive_required=consecutive_required))
+
+    actual = df['ActualLabel'].astype(int).to_numpy() if 'ActualLabel' in df.columns else np.zeros(len(df), dtype=int)
+    pred = np.asarray(event_predictions, dtype=int)
+
+    tp = int(np.sum((actual == 1) & (pred == 1)))
+    fp = int(np.sum((actual == 0) & (pred == 1)))
+    tn = int(np.sum((actual == 0) & (pred == 0)))
+    fn = int(np.sum((actual == 1) & (pred == 0)))
+
+    tpr = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+    fpr = fp / (fp + tn) if (fp + tn) > 0 else 0.0
+
+    return {
+        'threshold': float(threshold),
+        'consecutive_required': int(consecutive_required),
+        'tp': tp,
+        'fp': fp,
+        'tn': tn,
+        'fn': fn,
+        'tpr': float(tpr),
+        'fpr': float(fpr),
+        'event_prod_tp': tp,
+        'event_prod_fp': fp,
+        'event_prod_tn': tn,
+        'event_prod_fn': fn,
+        'event_prod_tpr': float(tpr),
+        'event_prod_fpr': float(fpr),
+    }
+
+
+def summarize_nda_production_metrics(df, threshold=0.5, consecutive_required=3):
+    """Summarize production-style detection but with FAR computed only on NDA events.
+
+    TPR is still computed on seizure events; FPR_NDA is FP_nda/(FP_nda+TN_nda).
+    Also returns FA/day ≈ FAR_NDA * NDA_EVENTS_PER_DAY.
+    """
+    event_predictions = []
+    for _, row in df.iterrows():
+        probs = _extract_event_probabilities(row)
+        if probs.size == 0:
+            event_predictions.append(0)
+            continue
+        event_predictions.append(_three_consecutive_predictions(probs, threshold=threshold, consecutive_required=consecutive_required))
+
+    actual = df['ActualLabel'].astype(int).to_numpy() if 'ActualLabel' in df.columns else np.zeros(len(df), dtype=int)
+    pred = np.asarray(event_predictions, dtype=int)
+
+    # Masks
+    is_nda = _is_nda_series(df['Type']) if 'Type' in df.columns else np.zeros(len(df), dtype=bool)
+    is_seizure = actual == 1
+    is_nda_neg = is_nda & (actual == 0)
+
+    tp = int(np.sum(is_seizure & (pred == 1)))
+    fn = int(np.sum(is_seizure & (pred == 0)))
+    fp_nda = int(np.sum(is_nda_neg & (pred == 1)))
+    tn_nda = int(np.sum(is_nda_neg & (pred == 0)))
+    fp_all = int(np.sum((actual == 0) & (pred == 1)))
+    tn_all = int(np.sum((actual == 0) & (pred == 0)))
+
+    tpr = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+    fpr_nda = fp_nda / (fp_nda + tn_nda) if (fp_nda + tn_nda) > 0 else 0.0
+    fpr_all = fp_all / (fp_all + tn_all) if (fp_all + tn_all) > 0 else 0.0
+
+    return {
+        'threshold': float(threshold),
+        'consecutive_required': int(consecutive_required),
+        'tp': tp, 'fn': fn, 'fp_nda': fp_nda, 'tn_nda': tn_nda, 'fp_all': fp_all, 'tn_all': tn_all,
+        'tpr': float(tpr), 'fpr_nda': float(fpr_nda), 'fpr_all': float(fpr_all),
+        'fa_per_day_nda': float(_fa_per_day(fpr_nda)), 'fa_per_day_all': float(_fa_per_day(fpr_all)),
+        'n_nda': int(is_nda_neg.sum()), 'n_seizure': int(is_seizure.sum()),
+    }
+
+
+def analyze_nda_far(df):
+    """Analyze FAR purely on NDA events (normal activity) and estimate FA/day."""
+    print("\n" + "="*80)
+    print("ANALYSIS OF NDA-ONLY FALSE ALARM RATE (REAL-WORLD)")
+    print("="*80)
+    if 'Type' not in df.columns:
+        print("WARNING: Type column missing – cannot compute NDA FAR")
+        return {'nda_count': 0, 'fpr_nda': 0.0, 'fa_per_day': 0.0, 'by_user': pd.DataFrame()}
+
+    is_nda = _is_nda_series(df['Type'])
+    nda_df = df[is_nda & (df['ActualLabel'] == 0)].copy() if 'ActualLabel' in df.columns else df[is_nda].copy()
+    print(f"\nTotal NDA events (Type='nda', ActualLabel=0): {len(nda_df)}")
+    print(f"Total events: {len(df)}, of which NDA fraction: {len(nda_df)/len(df):.2%}" if len(df) > 0 else "N/A")
+
+    if len(nda_df) == 0:
+        print("No NDA events found – FAR_NDA undefined")
+        metrics = {
+            'nda_count': 0,
+            'fpr_nda': 0.0,
+            'fp_nda': 0,
+            'tn_nda': 0,
+            'fa_per_day': 0.0,
+            'fpr_all': 0.0,
+            'by_user': pd.DataFrame()
+        }
+        return metrics
+
+    fp_nda = (nda_df['ModelPrediction'] == 1).sum()
+    tn_nda = (nda_df['ModelPrediction'] == 0).sum()
+    fpr_nda = fp_nda / (fp_nda + tn_nda) if (fp_nda + tn_nda) > 0 else 0.0
+    fa_per_day = _fa_per_day(fpr_nda)
+
+    # Overall FAR for comparison
+    non_seizure_df = df[df['ActualLabel'] == 0] if 'ActualLabel' in df.columns else df
+    fp_all = (non_seizure_df['ModelPrediction'] == 1).sum() if 'ModelPrediction' in non_seizure_df.columns else 0
+    tn_all = (non_seizure_df['ModelPrediction'] == 0).sum() if 'ModelPrediction' in non_seizure_df.columns else 0
+    fpr_all = fp_all / (fp_all + tn_all) if (fp_all + tn_all) > 0 else 0.0
+
+    print(f"NDA FAR: {fpr_nda:.4f}  (FP={fp_nda}, TN={tn_nda})")
+    print(f"Overall FAR (all non-seizure): {fpr_all:.4f}  (FP={fp_all}, TN={tn_all})")
+    print(f"Estimated false alarms per day (NDA, 3 min/event, 480/day): {fa_per_day:.2f} FA/day")
+    print(f"  →  {fa_per_day*7:.1f} per week,  {fa_per_day*30:.1f} per 30 days")
+
+    # Per-user NDA FAR
+    user_counts = nda_df['UserID'].value_counts() if 'UserID' in nda_df.columns else pd.Series(dtype=int)
+    by_user = []
+    if 'UserID' in nda_df.columns:
+        for user in sorted(nda_df['UserID'].dropna().unique(), key=lambda x: str(x)):
+            user_data = nda_df[nda_df['UserID'] == user]
+            fp_u = (user_data['ModelPrediction'] == 1).sum()
+            tn_u = (user_data['ModelPrediction'] == 0).sum()
+            fpr_u = fp_u / (fp_u + tn_u) if (fp_u + tn_u) > 0 else 0.0
+            by_user.append({'User': str(user), 'NDA_events': len(user_data), 'FP': int(fp_u), 'TN': int(tn_u), 'FAR_NDA': fpr_u, 'FA_per_day': _fa_per_day(fpr_u)})
+        by_user_df = pd.DataFrame(by_user).sort_values('FAR_NDA', ascending=False) if by_user else pd.DataFrame()
+        if len(by_user_df) > 0:
+            print("\nFAR_NDA by User (NDA events only):")
+            print(by_user_df.to_string(index=False))
+        else:
+            by_user_df = pd.DataFrame()
+    else:
+        by_user_df = pd.DataFrame()
+
+    metrics = {
+        'nda_count': int(len(nda_df)),
+        'fpr_nda': float(fpr_nda),
+        'fp_nda': int(fp_nda),
+        'tn_nda': int(tn_nda),
+        'fa_per_day': float(fa_per_day),
+        'fpr_all': float(fpr_all),
+        'fp_all': int(fp_all),
+        'tn_all': int(tn_all),
+        'by_user': by_user_df
+    }
+    return metrics
+
+
+def analyze_by_user(df, seizure_threshold=3, far_threshold=100):
+    """Analyze TPR and FAR by user, grouping users with < seizure_threshold seizures and < far_threshold non-seizures as 'other'."""
+    print("\n" + "="*80)
+    print("ANALYSIS BY USER")
+    print(f"Seizure threshold: {seizure_threshold}, FAR threshold: {far_threshold}")
+    print("="*80)
+    
+    # Get seizure events only
+    seizure_df = df[df['ActualLabel'] == 1].copy()
+    
+    # Count seizures per user
+    user_seizure_counts = seizure_df['UserID'].value_counts()
+    print(f"\nTotal users with seizures: {len(user_seizure_counts)}")
+    print(f"Users with >= {seizure_threshold} seizures: {(user_seizure_counts >= seizure_threshold).sum()}")
+    print(f"Users with < {seizure_threshold} seizures: {(user_seizure_counts < seizure_threshold).sum()}")
+    
+    # Group users with < seizure_threshold seizures as 'other'
+    def group_users(user_id):
+        if pd.isna(user_id):
+            return 'Unknown'
+        if user_seizure_counts.get(user_id, 0) < seizure_threshold:
+            return 'Other'
+        return str(user_id)
+    
+    seizure_df['UserGroup'] = seizure_df['UserID'].apply(group_users)
+    
+    # Calculate metrics by user
+    user_metrics = []
+    for user in sorted(seizure_df['UserGroup'].unique()):
+        user_data = seizure_df[seizure_df['UserGroup'] == user]
+        tp = (user_data['ModelPrediction'] == 1).sum()
+        fn = (user_data['ModelPrediction'] == 0).sum()
+        tpr = tp / (tp + fn) if (tp + fn) > 0 else 0
+        
+        user_metrics.append({
+            'User': user,
+            'Seizures': len(user_data),
+            'TP': tp,
+            'FN': fn,
+            'TPR': tpr
+        })
+    
+    user_metrics_df = pd.DataFrame(user_metrics).sort_values('TPR', ascending=False)
+    print("\nTPR by User:")
+    print(user_metrics_df.to_string(index=False))
+    
+    # Calculate FAR (False Alarm Rate) by user
+    non_seizure_df = df[df['ActualLabel'] == 0].copy()
+    
+    # Count non-seizures per user for FAR grouping
+    user_non_seizure_counts = non_seizure_df['UserID'].value_counts()
+    print(f"Users with >= {far_threshold} non-seizure events: {(user_non_seizure_counts >= far_threshold).sum()}")
+    print(f"Users with < {far_threshold} non-seizure events: {(user_non_seizure_counts < far_threshold).sum()}")
+    
+    # Group users with < far_threshold non-seizure events as 'other'
+    def group_users_far(user_id):
+        if pd.isna(user_id):
+            return 'Unknown'
+        if user_non_seizure_counts.get(user_id, 0) < far_threshold:
+            return 'Other'
+        return str(user_id)
+    
+    non_seizure_df['UserGroup'] = non_seizure_df['UserID'].apply(group_users_far)
+    
+    far_metrics = []
+    for user in sorted(non_seizure_df['UserGroup'].unique()):
+        user_data = non_seizure_df[non_seizure_df['UserGroup'] == user]
+        fp = (user_data['ModelPrediction'] == 1).sum()
+        tn = (user_data['ModelPrediction'] == 0).sum()
+        far = fp / (fp + tn) if (fp + tn) > 0 else 0
+        
+        far_metrics.append({
+            'User': user,
+            'NonSeizures': len(user_data),
+            'FP': fp,
+            'TN': tn,
+            'FAR': far
+        })
+    
+    far_metrics_df = pd.DataFrame(far_metrics).sort_values('FAR', ascending=False)
+    print("\nFAR (False Alarm Rate) by User:")
+    print(far_metrics_df.to_string(index=False))
+    
+    return seizure_df, user_metrics_df, far_metrics_df
+
+
+def analyze_by_seizure_type(df):
+    """Analyze TPR by seizure type."""
+    print("\n" + "="*80)
+    print("ANALYSIS BY SEIZURE TYPE")
+    print("="*80)
+    
+    seizure_df = df[df['ActualLabel'] == 1].copy()
+    
+    # Get all seizure types
+    print(f"\nUnique seizure types: {seizure_df['Type'].unique()}")
+    print(f"Unique seizure subtypes: {seizure_df['SubType'].unique()}")
+    
+    # Analyze by subtype
+    subtype_metrics = []
+    # Filter out NaN values before sorting to avoid TypeError
+    subtypes = [st for st in seizure_df['SubType'].unique() if pd.notna(st)]
+    for subtype in sorted(subtypes):
+        subtype_data = seizure_df[seizure_df['SubType'] == subtype]
+        tp = (subtype_data['ModelPrediction'] == 1).sum()
+        fn = (subtype_data['ModelPrediction'] == 0).sum()
+        tpr = tp / (tp + fn) if (tp + fn) > 0 else 0
+        
+        subtype_metrics.append({
+            'SubType': str(subtype),
+            'Count': len(subtype_data),
+            'TP': tp,
+            'FN': fn,
+            'TPR': tpr
+        })
+    
+    subtype_metrics_df = pd.DataFrame(subtype_metrics).sort_values('TPR', ascending=False)
+    print("\nTPR by Seizure SubType:")
+    print(subtype_metrics_df.to_string(index=False))
+    
+    # Analyze combined vs Tonic-Clonic
+    combined_df = seizure_df[seizure_df['SubType'].str.contains('Tonic-Clonic|Combined', case=False, na=False)]
+    tc_tp = (combined_df['ModelPrediction'] == 1).sum()
+    tc_fn = (combined_df['ModelPrediction'] == 0).sum()
+    tc_tpr = tc_tp / (tc_tp + tc_fn) if (tc_tp + tc_fn) > 0 else 0
+    
+    print(f"\nTonic-Clonic/Combined Seizures: {len(combined_df)}")
+    print(f"  TP: {tc_tp}, FN: {tc_fn}, TPR: {tc_tpr:.3f}")
+    
+    return seizure_df, subtype_metrics_df
+
+
+def analyze_tonic_clonic_seizures(df):
+    """Analyze TPR specifically for Tonic-Clonic seizures (Type=Seizure, Sub-Type=Tonic-Clonic).
+    
+    Returns:
+        tc_metrics_dict: Dictionary with keys: Count, TP, FN, TPR, FPR, TN, FP
+    """
+    print("\n" + "="*80)
+    print("ANALYSIS OF TONIC-CLONIC SEIZURES ONLY")
+    print("="*80)
+    
+    # Filter to only actual seizures
+    seizure_df = df[df['ActualLabel'] == 1].copy()
+    
+    # Filter to only Tonic-Clonic type (Type=Seizure, Sub-Type=Tonic-Clonic)
+    tc_df = seizure_df[(seizure_df['Type'] == 'Seizure') & 
+                       (seizure_df['SubType'] == 'Tonic-Clonic')].copy()
+    
+    tp = (tc_df['ModelPrediction'] == 1).sum()
+    fn = (tc_df['ModelPrediction'] == 0).sum()
+    tpr = tp / (tp + fn) if (tp + fn) > 0 else 0
+    
+    # Also get FP/FN stats from non-seizure events (for false alarm rate context)
+    non_seizure_df = df[df['ActualLabel'] == 0].copy()
+    fp = (non_seizure_df['ModelPrediction'] == 1).sum()
+    tn = (non_seizure_df['ModelPrediction'] == 0).sum()
+    
+    metrics = {
+        'Count': len(tc_df),
+        'TP': int(tp),
+        'FN': int(fn),
+        'TPR': float(tpr),
+        'TP_FN_Total': int(tp + fn),
+        'FP': int(fp),
+        'TN': int(tn),
+        'FPR': float(fp / (fp + tn)) if (fp + tn) > 0 else 0
+    }
+    
+    print(f"\nTonic-Clonic Seizures (Type=Seizure, Sub-Type=Tonic-Clonic):")
+    print(f"  Total Count: {metrics['Count']}")
+    print(f"  TP: {metrics['TP']}, FN: {metrics['FN']}")
+    print(f"  TPR (Sensitivity): {metrics['TPR']:.3f}")
+    print(f"  False Positives on non-seizure data: {metrics['FP']}")
+    print(f"  FPR: {metrics['FPR']:.3f}")
+    
+    return metrics
+
+
+def analyze_false_alarms(df):
+    """Analyze event types/subtypes contributing to false alarms."""
+    print("\n" + "="*80)
+    print("ANALYSIS OF FALSE ALARMS")
+    print("="*80)
+    
+    non_seizure_df = df[df['ActualLabel'] == 0].copy()
+    false_alarms_df = non_seizure_df[non_seizure_df['ModelPrediction'] == 1].copy()
+    
+    print(f"\nTotal non-seizure events: {len(non_seizure_df)}")
+    print(f"False alarms (predicted as seizure): {len(false_alarms_df)}")
+    print(f"Overall FAR: {len(false_alarms_df) / len(non_seizure_df):.3f}" if len(non_seizure_df) > 0 else "N/A")
+    
+    # Count events per subtype to group small ones as 'other'
+    subtype_counts = non_seizure_df['SubType'].value_counts()
+    
+    # Analyze by type
+    if len(false_alarms_df) > 0:
+        print("\nFalse Alarms by Type:")
+        type_counts = false_alarms_df['Type'].value_counts()
+        print(type_counts)
+        
+        # Analyze by subtype
+        print("\nFalse Alarms by SubType:")
+        subtype_counts_fa = false_alarms_df['SubType'].value_counts()
+        print(subtype_counts_fa)
+        
+        # Calculate FAR by subtype, grouping small ones as 'other'
+        print("\nFAR by SubType (for non-seizure events, grouping < 5 events as 'other'):")
+        
+        # Create a mapping function
+        def group_subtypes(subtype):
+            if pd.isna(subtype):
+                return 'Unknown'
+            if subtype_counts.get(subtype, 0) < 5:
+                return 'Other'
+            return str(subtype)
+        
+        # Apply grouping
+        non_seizure_df_grouped = non_seizure_df.copy()
+        non_seizure_df_grouped['SubType_Grouped'] = non_seizure_df_grouped['SubType'].apply(group_subtypes)
+        
+        far_by_subtype = []
+        for subtype in sorted(non_seizure_df_grouped['SubType_Grouped'].unique()):
+            subtype_data = non_seizure_df_grouped[non_seizure_df_grouped['SubType_Grouped'] == subtype]
+            fp = (subtype_data['ModelPrediction'] == 1).sum()
+            tn = (subtype_data['ModelPrediction'] == 0).sum()
+            far = fp / (fp + tn) if (fp + tn) > 0 else 0
+            
+            far_by_subtype.append({
+                'SubType': subtype,
+                'Count': len(subtype_data),
+                'FP': fp,
+                'TN': tn,
+                'FAR': far
+            })
+        
+        far_by_subtype_df = pd.DataFrame(far_by_subtype).sort_values('FAR', ascending=False)
+        print(far_by_subtype_df.to_string(index=False))
+    
+    return false_alarms_df, far_by_subtype_df if len(false_alarms_df) > 0 else pd.DataFrame()
+
+
+def generate_plots(df, seizure_df, user_metrics_df, far_metrics_df, subtype_metrics_df, false_alarms_df, false_negatives_df, fn_enhanced_details_df, output_dir, seizure_threshold=3, far_threshold=100):
+    """Generate plots and save to PDF."""
+    pdf_path = os.path.join(output_dir, 'event_analysis_report.pdf')
+    production_summary = summarize_production_metrics(df, threshold=0.5, consecutive_required=3)
+    # NDA-specific summaries for real-world FAR
+    nda_production_summary = summarize_nda_production_metrics(df, threshold=0.5, consecutive_required=3)
+    nda_metrics = analyze_nda_far(df)
+
+    model_prefix = os.path.basename(df.attrs.get('source_csv_path', '')).replace('_event_results.csv', '')
+    if not model_prefix:
+        model_prefix = 'model'
+
+    threshold_comparison_path = _find_first_matching_file(
+        output_dir,
+        [f'{model_prefix}_event_vs_production_threshold_analysis.png', '*_event_vs_production_threshold_analysis.png'],
+    )
+    threshold_comparison_path_tc = _find_first_matching_file(
+        output_dir,
+        [f'{model_prefix}_event_vs_production_threshold_analysis_tonic_clonic.png', '*_event_vs_production_threshold_analysis_tonic_clonic.png'],
+    )
+    threshold_nda_path = _find_first_matching_file(
+        output_dir,
+        [f'{model_prefix}_nda_threshold_analysis.png', '*_nda_threshold_analysis.png'],
+    )
+    training_tpr_fpr_path = _find_first_matching_file(
+        output_dir,
+        [f'{model_prefix}_training_tpr_fpr.png', '*_training_tpr_fpr.png'],
+    )
+    training_youden_path = _find_first_matching_file(
+        output_dir,
+        [f'{model_prefix}_training_youden.png', '*_training_youden.png'],
+    )
+    training_overview_path = _find_first_matching_file(
+        output_dir,
+        [f'{model_prefix}_training.png', '*_training.png'],
+    )
+    training_diagnostics_path = _find_first_matching_file(
+        output_dir,
+        [f'{model_prefix}_training2.png', '*_training2.png'],
+    )
+    latency_plot_path = _find_first_matching_file(
+        output_dir,
+        [f'{model_prefix}_latency_vs_threshold.png', '*_latency_vs_threshold.png'],
+    )
+    latency_json_path = _find_first_matching_file(
+        output_dir,
+        [f'{model_prefix}_latency_data.json', '*_latency_data.json'],
+    )
+    
+    with PdfPages(pdf_path) as pdf:
+        _add_intro_page(
+            pdf,
+            'Event Analysis Report: How to Read This Document',
+            [
+                'This report moves from model training quality, to threshold trade-offs, then to event outcomes.',
+                '',
+                'Recommended reading order:',
+                '1. Training history plots: verify optimization stability and check for overfitting or unfinished training.',
+                '2. Event vs production threshold plot: compare sensitivity/false-alarm trade-off under both decision rules.',
+                '3. Production summary and event-level confusion plots: check deployed behavior and user/subtype hotspots.',
+                '4. False-negative probability traces and tables: inspect missed seizures and their context notes.',
+                '',
+                'Legend:',
+                '- Event-Level: event is positive if any datapoint crosses threshold.',
+                '- Production-Level: event is positive when 3 consecutive datapoints cross threshold.',
+                '- Datapoint-Level: raw point-by-point seizure probabilities.',
+            ],
+        )
+
+        if training_overview_path or training_diagnostics_path or training_tpr_fpr_path or training_youden_path:
+            _add_intro_page(
+                pdf,
+                'Training History Section',
+                [
+                    'These graphs show whether model training converged, remained stable, and completed cleanly.',
+                    'Use them to detect unstable learning, divergence, or overfitting before interpreting test metrics.',
+                ],
+            )
+
+            _add_image_page(
+                pdf,
+                training_overview_path,
+                'Training History Overview',
+                [
+                    'Purpose: Check broad trends in train/validation metrics across epochs.',
+                    'What to look for: smooth improvement, no large oscillations, and no late-epoch collapse.',
+                ],
+            )
+            _add_image_page(
+                pdf,
+                training_diagnostics_path,
+                'Training History Diagnostics',
+                [
+                    'Purpose: Secondary training diagnostics for stability and separation quality.',
+                    'What to look for: consistent validation behavior and absence of erratic jumps.',
+                ],
+            )
+            _add_image_page(
+                pdf,
+                training_tpr_fpr_path,
+                'Training TPR/FPR Evolution',
+                [
+                    'Purpose: Track sensitivity and false-alarm behavior as training progresses.',
+                    'What to look for: improving TPR without corresponding sharp FPR inflation.',
+                ],
+            )
+            _add_image_page(
+                pdf,
+                training_youden_path,
+                'Training Youden Evolution',
+                [
+                    'Purpose: Track Youden J (TPR - FPR) as a single summary of discrimination over training.',
+                    'What to look for: steady increase to a plateau; drops may signal overfitting or threshold drift.',
+                ],
+            )
+
+        if threshold_comparison_path or threshold_comparison_path_tc or threshold_nda_path:
+            _add_intro_page(
+                pdf,
+                'Threshold Strategy Section',
+                [
+                    'This section compares Event-Level and Production-Level decision rules on one graph.',
+                    'Use it to select operating thresholds that preserve sensitivity while controlling false alarms.',
+                    'NDA-only FAR curves (orange/purple) show real-world false alarms on normal activity (3-min NDA events).',
+                    'Secondary axis shows FA/day ≈ FAR_NDA × 480 (24h / 3-min).',
+                ],
+            )
+            if threshold_comparison_path:
+                _add_image_page(
+                    pdf,
+                    threshold_comparison_path,
+                    'Event-Level vs Production-Level Threshold Analysis (All Seizures + NDA)',
+                    [
+                        'Purpose: Directly compare event and production trade-offs at the same threshold values (all seizures).',
+                        'What to look for: where Production-Level suppresses false alarms without losing too much TPR.',
+                        'Orange/purple lines are NDA-only FAR (real-world); secondary axis shows FA/day (≈ FAR_NDA × 480).',
+                    ],
+                )
+            if threshold_nda_path:
+                _add_image_page(
+                    pdf,
+                    threshold_nda_path,
+                    'NDA FAR vs Threshold (Real-World, 3-min NDA events)',
+                    [
+                        'Purpose: Real-world false-alarm estimate using only NDA (normal activity) negatives.',
+                        f'NDA events: {nda_metrics.get("nda_count", 0)} (≈ {nda_metrics.get("nda_count", 0)*NDA_EVENT_DURATION_MIN:.0f} min). FA/day = FAR_NDA × {int(NDA_EVENTS_PER_DAY)}.',
+                        'What to look for: choose threshold where FA/day is acceptable while TPR remains high.',
+                    ],
+                )
+            if threshold_comparison_path_tc:
+                _add_image_page(
+                    pdf,
+                    threshold_comparison_path_tc,
+                    'Event-Level vs Production-Level Threshold Analysis (Tonic-Clonic Seizures)',
+                    [
+                        'Purpose: Same comparison restricted to tonic-clonic seizures – the key TPR objective.',
+                        'What to look for: thresholds achieving ≥80% Tonic-Clonic TPR with minimal FPR; compare to all-seizure curve above.',
+                    ],
+                )
+
+        if latency_plot_path or latency_json_path:
+            _add_intro_page(
+                pdf,
+                'Alarm Latency Section',
+                [
+                    'Alarm latency = first datapoint dataTime with seizure probability >= threshold',
+                    'minus seizure start (event dataTime + seizureTimes[0]).',
+                    'Negative latency means the model fired before the annotated seizure start.',
+                    'Statistics (mean ± std) are over detected seizure events with known onset only;',
+                    'undetected events and events without seizureTimes are excluded from mean/std',
+                    'but reported via detection counts.',
+                    'SeizureTimes are offsets in seconds (see flattenData.py); datapoint dataTime',
+                    'is the end of each ~5s window.',
+                ],
+            )
+            if latency_plot_path:
+                _add_image_page(
+                    pdf,
+                    latency_plot_path,
+                    'Alarm Latency vs Threshold (All Seizures and Tonic-Clonic)',
+                    [
+                        'Purpose: Show detection delay as a function of operating threshold.',
+                        'What to look for: latency typically rises with threshold; compare all-seizure',
+                        'vs tonic-clonic curves and check detection counts (n) at candidate thresholds.',
+                    ],
+                )
+            if latency_json_path:
+                try:
+                    with open(latency_json_path, 'r') as f:
+                        lat_data = json.load(f)
+                    thresholds = lat_data.get('thresholds', [])
+                    all_d = lat_data.get('all', {})
+                    tc_d = lat_data.get('tonic_clonic', {})
+                    if thresholds:
+                        fig, ax = plt.subplots(figsize=(12, max(4, 0.6 * len(thresholds) + 2)))
+                        ax.axis('tight')
+                        ax.axis('off')
+                        rows = []
+                        for i, th in enumerate(thresholds):
+                            try:
+                                m_a = all_d.get('mean', [])[i]
+                                s_a = all_d.get('std', [])[i]
+                                n_a = all_d.get('n_detected', [])[i]
+                            except IndexError:
+                                m_a, s_a, n_a = float('nan'), float('nan'), 0
+                            try:
+                                m_t = tc_d.get('mean', [])[i]
+                                s_t = tc_d.get('std', [])[i]
+                                n_t = tc_d.get('n_detected', [])[i]
+                            except IndexError:
+                                m_t, s_t, n_t = float('nan'), float('nan'), 0
+                            import math
+                            a_ok = bool(n_a) and m_a is not None and not (isinstance(m_a, float) and math.isnan(m_a))
+                            t_ok = bool(n_t) and m_t is not None and not (isinstance(m_t, float) and math.isnan(m_t))
+                            a_str = f'{m_a:.1f} ± {s_a:.1f}s (n={n_a})' if a_ok else f'n/a (n={n_a})'
+                            t_str = f'{m_t:.1f} ± {s_t:.1f}s (n={n_t})' if t_ok else f'n/a (n={n_t})'
+                            rows.append([f'{float(th):.1f}', a_str, t_str])
+                        table = ax.table(cellText=rows,
+                                         colLabels=['Threshold', 'All seizures mean ± std', 'Tonic-clonic mean ± std'],
+                                         cellLoc='center', loc='center', bbox=[0, 0, 1, 1])
+                        table.auto_set_font_size(False)
+                        table.set_fontsize(10)
+                        table.scale(1, 1.6)
+                        for j in range(3):
+                            table[(0, j)].set_facecolor('#4472C4')
+                            table[(0, j)].set_text_props(weight='bold', color='white')
+                        for i in range(1, len(rows) + 1):
+                            for j in range(3):
+                                table[(i, j)].set_facecolor('#E7E6E6' if i % 2 == 0 else '#F2F2F2')
+                        fig.suptitle('ALARM LATENCY STATISTICS (mean ± std over detected events with known onset)',
+                                     fontsize=13, fontweight='bold', y=0.98)
+                        fig.text(0.5, 0.02,
+                                 f"Seizures: {all_d.get('n_total', 0)} all ({all_d.get('n_with_onset', 0)} with onset) / "
+                                 f"{tc_d.get('n_total', 0)} TC ({tc_d.get('n_with_onset', 0)} with onset). "
+                                 f"Unit: {lat_data.get('unit', 'seconds')}.",
+                                 ha='center', fontsize=9)
+                        pdf.savefig(fig, bbox_inches='tight')
+                        plt.close(fig)
+                except Exception as e:
+                    print(f"Warning: could not add latency stats table to PDF: {e}")
+
+        # Page 0: Production summary for 3-consecutive datapoint detection
+        fig, ax = plt.subplots(figsize=(10, 6))
+        metrics = [
+            ('TP', production_summary['tp']),
+            ('FP', production_summary['fp']),
+            ('TN', production_summary['tn']),
+            ('FN', production_summary['fn'])
+        ]
+        labels, values = zip(*metrics)
+        ax.bar(labels, values, color=['#2ecc71', '#e74c3c', '#95a5a6', '#f39c12'])
+        ax.set_title('Production-Level Event Analysis\n(3 consecutive datapoints >= 0.5)', fontsize=14, fontweight='bold')
+        ax.set_ylabel('Count')
+        for i, val in enumerate(values):
+            ax.text(i, val + 0.05, str(val), ha='center', va='bottom', fontsize=10)
+        ax.text(0.02, 0.98, f"TPR={production_summary['tpr']:.3f}\nFPR={production_summary['fpr']:.3f} (all non-seizure)",
+                transform=ax.transAxes, va='top', fontsize=11, bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+        plt.tight_layout()
+        pdf.savefig(fig, bbox_inches='tight')
+        plt.close()
+
+        # Page 0b: NDA-only production summary (real-world FAR)
+        fig, ax = plt.subplots(figsize=(10, 6))
+        nda_metrics_bar = [
+            ('TP', nda_production_summary['tp']),
+            ('FP_NDA', nda_production_summary['fp_nda']),
+            ('TN_NDA', nda_production_summary['tn_nda']),
+            ('FN', nda_production_summary['fn'])
+        ]
+        labels_nda, values_nda = zip(*nda_metrics_bar)
+        ax.bar(labels_nda, values_nda, color=['#2ecc71', '#e67e22', '#95a5a6', '#f39c12'])
+        ax.set_title('NDA-Only Production-Level Event Analysis\n(3 consecutive datapoints ≥0.5, FAR on NDA only)', fontsize=14, fontweight='bold')
+        ax.set_ylabel('Count')
+        for i, val in enumerate(values_nda):
+            ax.text(i, val + 0.05, str(val), ha='center', va='bottom', fontsize=10)
+        ax.text(0.02, 0.98,
+                f"TPR={nda_production_summary['tpr']:.3f}\nFPR_NDA={nda_production_summary['fpr_nda']:.4f}\nFA/day≈{nda_production_summary['fa_per_day_nda']:.1f} (NDA {NDA_EVENT_DURATION_MIN:.0f} min, {int(NDA_EVENTS_PER_DAY)}/day)\nN={nda_production_summary['n_nda']} NDA events",
+                transform=ax.transAxes, va='top', fontsize=10, bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+        plt.tight_layout()
+        pdf.savefig(fig, bbox_inches='tight')
+        plt.close()
+
+        # Text page: NDA FAR explanation
+        _add_intro_page(
+            pdf,
+            'NDA-Only FAR: Real-World Estimate',
+            [
+                f"NDA events are normal daily activity (≈ {NDA_EVENT_DURATION_MIN:.0f} minutes each).",
+                f"Assuming {int(NDA_EVENTS_PER_DAY)} NDA events per 24h (1440 min / {NDA_EVENT_DURATION_MIN:.0f} min),",
+                f"false alarms per day ≈ FAR_NDA × {int(NDA_EVENTS_PER_DAY)}.",
+                '',
+                f"At default threshold 0.5 (production rule, 3 consecutive ≥0.5):",
+                f"  Event-level NDA FAR = {nda_metrics.get('fpr_nda', 0):.4f} → {nda_metrics.get('fa_per_day', 0):.2f} FA/day",
+                f"  Production NDA FAR = {nda_production_summary['fpr_nda']:.4f} → {nda_production_summary['fa_per_day_nda']:.2f} FA/day",
+                f"  Overall FAR (all non-seizure) for comparison: {production_summary['fpr']:.4f} (event) / {nda_production_summary['fpr_all']:.4f} (NDA production all)",
+                '',
+                'For threshold tuning, see NDA threshold curves (FPR_NDA vs threshold) – secondary axis shows FA/day.',
+                'NDA FAR is typically lower than all-non-seizure FAR because other non-seizure subtypes are enriched for borderline activity.',
+            ],
+        )
+
+        # Plot 1: TPR by User
+        if len(user_metrics_df) > 0:
+            fig, ax = plt.subplots(figsize=(12, 6))
+            users = user_metrics_df['User']
+            tprs = user_metrics_df['TPR']
+            counts = user_metrics_df['Seizures']
+            colors = ['#2ecc71' if tpr >= 0.8 else '#f39c12' if tpr >= 0.6 else '#e74c3c' for tpr in tprs]
+            
+            ax.barh(users, tprs, color=colors)
+            ax.set_xlabel('TPR (True Positive Rate)', fontsize=12, fontweight='bold')
+            ax.set_title('Event-Level TPR by User (Seizure Events)', fontsize=14, fontweight='bold')
+            ax.set_xlim(0, 1)
+            
+            # Add value labels
+            for i, (user, tpr, count) in enumerate(zip(users, tprs, counts)):
+                ax.text(tpr + 0.02, i, f'{tpr:.2%} (n={count})', va='center', fontsize=10)
+            
+            ax.axvline(x=0.8, color='gray', linestyle='--', alpha=0.5, label='80% threshold')
+            ax.legend()
+            plt.tight_layout()
+            pdf.savefig(fig, bbox_inches='tight')
+            plt.close()
+
+        # Plot 1b: TPR by User (Tonic-Clonic SubType)
+        # Compute user metrics restricted to Tonic-Clonic seizures
+        if len(seizure_df) > 0:
+            # Filter to Tonic-Clonic subtype (case-insensitive, handle NaN)
+            tc_seizure_df = seizure_df[seizure_df['SubType'].str.contains('Tonic-Clonic', case=False, na=False)].copy()
+            if len(tc_seizure_df) > 0:
+                # Group users with < seizure_threshold total seizures as 'Other' (consistent with overall)
+                user_seizure_counts_overall = seizure_df['UserID'].value_counts()
+                def group_users_tc(user_id):
+                    if pd.isna(user_id):
+                        return 'Unknown'
+                    if user_seizure_counts_overall.get(user_id, 0) < seizure_threshold:
+                        return 'Other'
+                    return str(user_id)
+                tc_seizure_df['UserGroup'] = tc_seizure_df['UserID'].apply(group_users_tc)
+
+                # Calculate TPR by user for TC only
+                tc_user_metrics = []
+                for user in sorted(tc_seizure_df['UserGroup'].unique()):
+                    user_data = tc_seizure_df[tc_seizure_df['UserGroup'] == user]
+                    tp = (user_data['ModelPrediction'] == 1).sum()
+                    fn = (user_data['ModelPrediction'] == 0).sum()
+                    tpr = tp / (tp + fn) if (tp + fn) > 0 else 0
+                    tc_user_metrics.append({
+                        'User': user,
+                        'Seizures': len(user_data),
+                        'TP': tp,
+                        'FN': fn,
+                        'TPR': tpr
+                    })
+
+                tc_user_metrics_df = pd.DataFrame(tc_user_metrics).sort_values('TPR', ascending=False)
+
+                # Plot TPR by user for TC seizures
+                if len(tc_user_metrics_df) > 0:
+                    fig, ax = plt.subplots(figsize=(12, 6))
+                    users_tc = tc_user_metrics_df['User']
+                    tprs_tc = tc_user_metrics_df['TPR']
+                    counts_tc = tc_user_metrics_df['Seizures']
+                    colors_tc = ['#2ecc71' if tpr >= 0.8 else '#f39c12' if tpr >= 0.6 else '#e74c3c' for tpr in tprs_tc]
+
+                    ax.barh(users_tc, tprs_tc, color=colors_tc)
+                    ax.set_xlabel('TPR (True Positive Rate)', fontsize=12, fontweight='bold')
+                    ax.set_title('Event-Level TPR by User (Tonic-Clonic Seizures)', fontsize=14, fontweight='bold')
+                    ax.set_xlim(0, 1)
+
+                    # Add value labels
+                    for i, (user, tpr, count) in enumerate(zip(users_tc, tprs_tc, counts_tc)):
+                        ax.text(tpr + 0.02, i, f'{tpr:.2%} (n={count})', va='center', fontsize=10)
+
+                    ax.axvline(x=0.8, color='gray', linestyle='--', alpha=0.5, label='80% threshold')
+                    ax.legend()
+                    plt.tight_layout()
+                    pdf.savefig(fig, bbox_inches='tight')
+                    plt.close()
+        
+        # Plot 2: FAR by User
+        if len(far_metrics_df) > 0:
+            fig, ax = plt.subplots(figsize=(12, 6))
+            users = far_metrics_df['User']
+            fars = far_metrics_df['FAR']
+            counts = far_metrics_df['NonSeizures']
+            colors = ['#e74c3c' if far > 0.05 else '#f39c12' if far > 0.01 else '#2ecc71' for far in fars]
+            
+            ax.barh(users, fars, color=colors)
+            ax.set_xlabel('FAR (False Alarm Rate)', fontsize=12, fontweight='bold')
+            ax.set_title('Event-Level FAR by User (Non-Seizure Events)', fontsize=14, fontweight='bold')
+            
+            # Add value labels
+            for i, (user, far, count) in enumerate(zip(users, fars, counts)):
+                ax.text(far + 0.002, i, f'{far:.2%} (n={count})', va='center', fontsize=10)
+            
+            plt.tight_layout()
+            pdf.savefig(fig, bbox_inches='tight')
+            plt.close()
+
+        # Plot 2b: NDA FAR by User (real-world)
+        _nda_by_user = nda_metrics.get('by_user', pd.DataFrame())
+        if isinstance(_nda_by_user, pd.DataFrame) and len(_nda_by_user) > 0:
+            fig, ax = plt.subplots(figsize=(12, 6))
+            users_nda = _nda_by_user['User']
+            fars_nda = _nda_by_user['FAR_NDA']
+            counts_nda = _nda_by_user['NDA_events']
+            fa_day_nda = _nda_by_user['FA_per_day']
+            colors_nda = ['#e74c3c' if far > 0.05 else '#f39c12' if far > 0.01 else '#2ecc71' for far in fars_nda]
+            ax.barh(users_nda, fars_nda, color=colors_nda)
+            ax.set_xlabel('FAR_NDA (NDA-only False Alarm Rate)', fontsize=12, fontweight='bold')
+            ax.set_title('Event-Level FAR_NDA by User (NDA events only, real-world)', fontsize=14, fontweight='bold')
+            for i, (user, far, count, fa_day) in enumerate(zip(users_nda, fars_nda, counts_nda, fa_day_nda)):
+                ax.text(far + 0.002, i, f'{far:.2%} (n={count}, {fa_day:.1f}/day)', va='center', fontsize=9)
+            plt.tight_layout()
+            pdf.savefig(fig, bbox_inches='tight')
+            plt.close()
+        
+        # Plot 3: TPR by Seizure SubType
+        if len(subtype_metrics_df) > 0:
+            fig, ax = plt.subplots(figsize=(12, 6))
+            subtypes = subtype_metrics_df['SubType']
+            tprs = subtype_metrics_df['TPR']
+            counts = subtype_metrics_df['Count']
+            
+            bars = ax.barh(subtypes, tprs, color='steelblue')
+            ax.set_xlabel('TPR (True Positive Rate)', fontsize=12, fontweight='bold')
+            ax.set_title('Event-Level TPR by Seizure SubType', fontsize=14, fontweight='bold')
+            ax.set_xlim(0, 1)
+            
+            # Add value labels with counts
+            for i, (subtype, tpr, count) in enumerate(zip(subtypes, tprs, counts)):
+                ax.text(tpr + 0.02, i, f'{tpr:.2%} (n={count})', va='center', fontsize=10)
+            
+            ax.axvline(x=0.8, color='gray', linestyle='--', alpha=0.5, label='80% threshold')
+            ax.legend()
+            plt.tight_layout()
+            pdf.savefig(fig, bbox_inches='tight')
+            plt.close()
+        
+        # Plot 4: False Alarms by SubType
+        if len(false_alarms_df) > 0:
+            non_seizure_df_plot = df[df['ActualLabel'] == 0].copy()
+            
+            # Count events per subtype
+            subtype_counts_plot = non_seizure_df_plot['SubType'].value_counts()
+            
+            # Group subtypes with < 5 events as 'other'
+            def group_subtypes_plot(subtype):
+                if pd.isna(subtype):
+                    return 'Unknown'
+                if subtype_counts_plot.get(subtype, 0) < 5:
+                    return 'Other'
+                return str(subtype)
+            
+            non_seizure_df_plot['SubType_Grouped'] = non_seizure_df_plot['SubType'].apply(group_subtypes_plot)
+            
+            # Get FAR by grouped subtype
+            subtype_fa_counts = []
+            for subtype in sorted(non_seizure_df_plot['SubType_Grouped'].unique()):
+                subtype_data = non_seizure_df_plot[non_seizure_df_plot['SubType_Grouped'] == subtype]
+                fp = (subtype_data['ModelPrediction'] == 1).sum()
+                tn = (subtype_data['ModelPrediction'] == 0).sum()
+                far = fp / (fp + tn) if (fp + tn) > 0 else 0
+                subtype_fa_counts.append((str(subtype), far, len(subtype_data)))
+            
+            subtype_fa_counts.sort(key=lambda x: x[1], reverse=True)
+            subtypes_fa = [x[0] for x in subtype_fa_counts]
+            fars_fa = [x[1] for x in subtype_fa_counts]
+            counts_fa = [x[2] for x in subtype_fa_counts]
+            
+            fig, ax = plt.subplots(figsize=(12, 6))
+            colors = ['#e74c3c' if far > 0.05 else '#f39c12' if far > 0.01 else '#2ecc71' for far in fars_fa]
+            bars = ax.barh(subtypes_fa, fars_fa, color=colors)
+            ax.set_xlabel('FAR (False Alarm Rate)', fontsize=12, fontweight='bold')
+            ax.set_title('Event-Level FAR by Event SubType (Non-Seizure Events)', fontsize=14, fontweight='bold')
+            
+            # Add value labels
+            for i, (subtype, far, count) in enumerate(zip(subtypes_fa, fars_fa, counts_fa)):
+                ax.text(far + 0.002, i, f'{far:.2%} (n={count})', va='center', fontsize=10)
+            
+            plt.tight_layout()
+            pdf.savefig(fig, bbox_inches='tight')
+            plt.close()
+        
+        # Plot 5: Confusion Matrix Summary
+        fig, ax = plt.subplots(figsize=(10, 8))
+        tp = (df['ModelPrediction'] == 1) & (df['ActualLabel'] == 1)
+        fp = (df['ModelPrediction'] == 1) & (df['ActualLabel'] == 0)
+        fn = (df['ModelPrediction'] == 0) & (df['ActualLabel'] == 1)
+        tn = (df['ModelPrediction'] == 0) & (df['ActualLabel'] == 0)
+        
+        cm = np.array([[tn.sum(), fp.sum()], [fn.sum(), tp.sum()]])
+        
+        sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', ax=ax, cbar_kws={'label': 'Count'},
+                   xticklabels=['Predicted Non-Seizure', 'Predicted Seizure'],
+                   yticklabels=['Actual Non-Seizure', 'Actual Seizure'])
+        ax.set_title('Event-Level Overall Confusion Matrix', fontsize=14, fontweight='bold')
+        plt.tight_layout()
+        pdf.savefig(fig, bbox_inches='tight')
+        plt.close()
+        
+        # Page 6: False Negatives Table (from CSV data) - comes first because it's usually shorter
+        if len(false_negatives_df) > 0:
+            fn_rows = false_negatives_df.copy()
+            import textwrap
+            for start in range(0, len(fn_rows), 4):
+                chunk = fn_rows.iloc[start:start + 4]
+                fig, axes = plt.subplots(len(chunk), 1, figsize=(12, 3.5 * len(chunk) + 1), squeeze=False)
+                fig.suptitle(
+                    f'DATAPOINT-LEVEL SEIZURE PROBABILITY TRACES FOR EVENT-LEVEL FALSE NEGATIVES ({start + 1}-{min(start + 4, len(fn_rows))} of {len(fn_rows)})',
+                    fontsize=14,
+                    fontweight='bold',
+                    y=0.98,
+                )
+                for ax, (_, row) in zip(axes.flat, chunk.iterrows()):
+                    probs = _extract_event_probabilities(row)
+                    if probs.size == 0:
+                        ax.text(0.5, 0.5, 'No datapoint probability trace available', ha='center', va='center', transform=ax.transAxes)
+                        ax.set_axis_off()
+                        continue
+
+                    time_idx = np.arange(len(probs))
+                    ax.plot(time_idx, probs, color='#1f77b4', marker='o', linewidth=2, markersize=4)
+                    ax.axhline(0.5, color='red', linestyle='--', linewidth=1.5, label='Threshold=0.5')
+                    ax.set_ylim(-0.05, 1.05)
+                    ax.set_ylabel('Seizure probability')
+                    ax.set_xlabel('Time index')
+                    ax.set_title(
+                        f"Datapoint-Level Probability Trace | Event {row.get('EventID', 'N/A')} | User {row.get('UserID', 'N/A')} | "
+                        f"{row.get('SubType', row.get('Type', 'N/A'))} | max={float(row.get('MaxSeizureProbability', np.nan)):.3f}"
+                    )
+                    description = row.get('Description', '')
+                    if pd.notna(description) and str(description).strip():
+                        wrapped_desc = '\n'.join(textwrap.wrap(str(description).strip(), width=105))
+                        ax.text(
+                            0.01,
+                            0.97,
+                            f"Notes: {wrapped_desc}",
+                            transform=ax.transAxes,
+                            ha='left',
+                            va='top',
+                            fontsize=8,
+                            bbox=dict(boxstyle='round', facecolor='white', alpha=0.75, edgecolor='gray')
+                        )
+                    ax.grid(alpha=0.3)
+                    ax.legend(loc='upper right', fontsize=8)
+                plt.tight_layout(rect=[0, 0, 1, 0.96])
+                pdf.savefig(fig, bbox_inches='tight')
+                plt.close(fig)
+
+        if len(false_negatives_df) > 0:
+            fig, ax = plt.subplots(figsize=(14, 10))
+            ax.axis('tight')
+            ax.axis('off')
+            
+            # Prepare table data - show first 30 rows
+            table_data = false_negatives_df[['EventID', 'UserID', 'Type', 'SubType', 'Description']].copy()
+            table_data = table_data.head(30)
+            table_data.columns = ['Event ID', 'User ID', 'Type', 'SubType', 'Description']
+            
+            # Wrap descriptions to prevent them from running off page - using textwrap
+            import textwrap
+            table_data['Description'] = table_data['Description'].fillna('').apply(
+                lambda x: '\n'.join(textwrap.wrap(str(x), width=35)) if len(str(x)) > 0 else ''
+            )
+            
+            # Create table with wrapped text
+            table = ax.table(cellText=table_data.values, colLabels=table_data.columns,
+                           cellLoc='left', loc='center', bbox=[0, 0, 1, 1])
+            table.auto_set_font_size(False)
+            table.set_fontsize(8)
+            table.scale(1, 1.8)
+            
+            # Enable text wrapping by setting cell properties
+            for key, cell in table.get_celld().items():
+                cell.set_text_props(wrap=True)
+            
+            # Style header
+            for i in range(len(table_data.columns)):
+                table[(0, i)].set_facecolor('#70AD47')
+                table[(0, i)].set_text_props(weight='bold', color='white')
+            
+            # Alternate row colors
+            for i in range(1, len(table_data) + 1):
+                for j in range(len(table_data.columns)):
+                    if i % 2 == 0:
+                        table[(i, j)].set_facecolor('#E2EFD9')
+                    else:
+                        table[(i, j)].set_facecolor('#F2F2F2')
+            
+            title = f'EVENT-LEVEL FALSE NEGATIVES (showing 1-{min(30, len(false_negatives_df))} of {len(false_negatives_df)} total)'
+            fig.suptitle(title, fontsize=14, fontweight='bold', y=0.98)
+            pdf.savefig(fig, bbox_inches='tight')
+            plt.close()
+        
+        # Page 7: False Negatives Enhanced Details (from allData.json if available)
+        if len(fn_enhanced_details_df) > 0:
+            fig, ax = plt.subplots(figsize=(14, 10))
+            ax.axis('tight')
+            ax.axis('off')
+            
+            # Prepare table data - show first 30 rows
+            table_data = fn_enhanced_details_df[['EventID', 'UserID', 'DateTime', 'Type', 'SubType', 'Description']].copy()
+            table_data = table_data.head(30)
+            table_data.columns = ['Event ID', 'User ID', 'DateTime', 'Type', 'SubType', 'Description']
+            
+            # Wrap descriptions to prevent them from running off page
+            import textwrap
+            table_data['Description'] = table_data['Description'].fillna('').apply(
+                lambda x: '\n'.join(textwrap.wrap(str(x), width=30)) if len(str(x)) > 0 else ''
+            )
+            
+            # Create table with wrapped text
+            table = ax.table(cellText=table_data.values, colLabels=table_data.columns,
+                           cellLoc='left', loc='center', bbox=[0, 0, 1, 1])
+            table.auto_set_font_size(False)
+            table.set_fontsize(7)
+            table.scale(1, 1.6)
+            
+            # Enable text wrapping by setting cell properties
+            for key, cell in table.get_celld().items():
+                cell.set_text_props(wrap=True)
+            
+            # Style header
+            for i in range(len(table_data.columns)):
+                table[(0, i)].set_facecolor('#70AD47')
+                table[(0, i)].set_text_props(weight='bold', color='white')
+            
+            # Alternate row colors
+            for i in range(1, len(table_data) + 1):
+                for j in range(len(table_data.columns)):
+                    if i % 2 == 0:
+                        table[(i, j)].set_facecolor('#E2EFD9')
+                    else:
+                        table[(i, j)].set_facecolor('#F2F2F2')
+            
+            title = f'EVENT-LEVEL FALSE NEGATIVES - ENHANCED DETAILS (showing 1-{min(30, len(fn_enhanced_details_df))} of {len(fn_enhanced_details_df)} total)'
+            fig.suptitle(title, fontsize=14, fontweight='bold', y=0.98)
+            pdf.savefig(fig, bbox_inches='tight')
+            plt.close()
+        
+        # Page 8: False Alarms Table - comes last because it might be very long
+        if len(false_alarms_df) > 0:
+            fig, ax = plt.subplots(figsize=(14, 10))
+            ax.axis('tight')
+            ax.axis('off')
+            
+            # Prepare table data - show first 30 rows
+            table_data = false_alarms_df[['EventID', 'UserID', 'Type', 'SubType', 'MaxSeizureProbability']].copy()
+            table_data = table_data.head(30)
+            table_data.columns = ['Event ID', 'User ID', 'Type', 'SubType', 'Max Seizure Prob']
+            
+            # Format the probability column
+            table_data['Max Seizure Prob'] = table_data['Max Seizure Prob'].apply(lambda x: f'{x:.4f}')
+            
+            # Create table
+            table = ax.table(cellText=table_data.values, colLabels=table_data.columns,
+                           cellLoc='left', loc='center', bbox=[0, 0, 1, 1])
+            table.auto_set_font_size(False)
+            table.set_fontsize(9)
+            table.scale(1, 1.5)
+            
+            # Style header
+            for i in range(len(table_data.columns)):
+                table[(0, i)].set_facecolor('#4472C4')
+                table[(0, i)].set_text_props(weight='bold', color='white')
+            
+            # Alternate row colors
+            for i in range(1, len(table_data) + 1):
+                for j in range(len(table_data.columns)):
+                    if i % 2 == 0:
+                        table[(i, j)].set_facecolor('#E7E6E6')
+                    else:
+                        table[(i, j)].set_facecolor('#F2F2F2')
+            
+            title = f'EVENT-LEVEL FALSE ALARMS (showing 1-{min(30, len(false_alarms_df))} of {len(false_alarms_df)} total)'
+            fig.suptitle(title, fontsize=14, fontweight='bold', y=0.98)
+            pdf.savefig(fig, bbox_inches='tight')
+            plt.close()
+    
+    print(f"\nReport saved to: {pdf_path}")
+    return pdf_path
+
+
+def generate_text_report(df, user_metrics_df, far_metrics_df, subtype_metrics_df, false_alarms_df, false_negatives_df, fn_details_df, output_dir, seizure_threshold=3, far_threshold=100):
+    """Generate text report."""
+    report_path = os.path.join(output_dir, 'event_analysis_report.txt')
+    
+    tp_total = ((df['ModelPrediction'] == 1) & (df['ActualLabel'] == 1)).sum()
+    fp_total = ((df['ModelPrediction'] == 1) & (df['ActualLabel'] == 0)).sum()
+    fn_total = ((df['ModelPrediction'] == 0) & (df['ActualLabel'] == 1)).sum()
+    tn_total = ((df['ModelPrediction'] == 0) & (df['ActualLabel'] == 0)).sum()
+    
+    tpr = tp_total / (tp_total + fn_total) if (tp_total + fn_total) > 0 else 0
+    far = fp_total / (fp_total + tn_total) if (fp_total + tn_total) > 0 else 0
+    
+    with open(report_path, 'w') as f:
+        f.write("="*80 + "\n")
+        f.write("EVENT ANALYSIS REPORT\n")
+        f.write("="*80 + "\n\n")
+        
+        f.write("OVERALL METRICS\n")
+        f.write("-"*80 + "\n")
+        f.write(f"Total Events: {len(df)}\n")
+        f.write(f"Seizure Events: {(df['ActualLabel'] == 1).sum()}\n")
+        f.write(f"Non-Seizure Events: {(df['ActualLabel'] == 0).sum()}\n\n")
+        f.write(f"True Positives (TP): {tp_total}\n")
+        f.write(f"False Positives (FP): {fp_total}\n")
+        f.write(f"True Negatives (TN): {tn_total}\n")
+        f.write(f"False Negatives (FN): {fn_total}\n\n")
+        f.write(f"Overall TPR (Sensitivity): {tpr:.3f}\n")
+        f.write(f"Overall FAR (False Alarm Rate): {far:.3f}\n")
+        # NDA-only real-world FAR
+        if 'Type' in df.columns:
+            is_nda_all = _is_nda_series(df['Type']) & (df['ActualLabel'] == 0)
+            nda_count_all = int(is_nda_all.sum())
+            fp_nda_all = int(((df['ModelPrediction'] == 1) & is_nda_all).sum())
+            tn_nda_all = int(((df['ModelPrediction'] == 0) & is_nda_all).sum())
+            far_nda_all = fp_nda_all / (fp_nda_all + tn_nda_all) if (fp_nda_all + tn_nda_all) > 0 else 0.0
+            fa_day_all = _fa_per_day(far_nda_all)
+            f.write(f"Overall NDA FAR (Type='nda' only, 3 min/event, {int(NDA_EVENTS_PER_DAY)}/day): {far_nda_all:.4f}  (FP={fp_nda_all}, TN={tn_nda_all}, N={nda_count_all})\n")
+            f.write(f"Estimated FA/day (NDA real-world): {fa_day_all:.2f}  ({fa_day_all*7:.1f}/week)\n\n")
+            # Production NDA metrics
+            try:
+                prod_nda = summarize_nda_production_metrics(df, threshold=0.5, consecutive_required=3)
+                f.write(f"Production (3-consecutive) NDA FAR: {prod_nda['fpr_nda']:.4f} → {prod_nda['fa_per_day_nda']:.2f} FA/day (N={prod_nda['n_nda']})\n")
+                f.write(f"Production TPR (seizures, same threshold): {prod_nda['tpr']:.4f}\n\n")
+            except Exception:
+                pass
+        else:
+            f.write("\n")
+
+        # Alarm latency statistics (precomputed by nnTester)
+        try:
+            _lat_json = _find_first_matching_file(output_dir, ['*_latency_data.json'])
+            if _lat_json and os.path.exists(_lat_json):
+                with open(_lat_json, 'r') as _lf:
+                    _lat = json.load(_lf)
+                _ths = _lat.get('thresholds', [])
+                _all = _lat.get('all', {})
+                _tc = _lat.get('tonic_clonic', {})
+                f.write("="*80 + "\n")
+                f.write("ALARM LATENCY vs THRESHOLD (mean ± std, seconds)\n")
+                f.write("="*80 + "\n")
+                f.write("Definition: first datapoint dataTime with p(seizure) >= threshold "
+                        "minus seizure start (event dataTime + seizureTimes[0]).\n")
+                f.write("Stats over detected events with known onset only; "
+                        "negative = alarm before annotated onset.\n")
+                f.write(f"Seizures: {_all.get('n_total', 0)} all "
+                        f"({_all.get('n_with_onset', 0)} with onset) / "
+                        f"{_tc.get('n_total', 0)} TC ({_tc.get('n_with_onset', 0)} with onset).\n")
+                f.write(f"{'Threshold':<12} {'All seizures':<28} {'Tonic-clonic':<28}\n")
+                f.write("-"*70 + "\n")
+                import math as _math
+                for _i, _th in enumerate(_ths):
+                    try:
+                        _ma = _all.get('mean', [])[_i]; _sa = _all.get('std', [])[_i]; _na = _all.get('n_detected', [])[_i]
+                    except IndexError:
+                        _ma, _sa, _na = float('nan'), float('nan'), 0
+                    try:
+                        _mt = _tc.get('mean', [])[_i]; _st = _tc.get('std', [])[_i]; _nt = _tc.get('n_detected', [])[_i]
+                    except IndexError:
+                        _mt, _st, _nt = float('nan'), float('nan'), 0
+                    _a_ok = bool(_na) and _ma is not None and not (isinstance(_ma, float) and _math.isnan(_ma))
+                    _t_ok = bool(_nt) and _mt is not None and not (isinstance(_mt, float) and _math.isnan(_mt))
+                    _a = f"{_ma:.1f} ± {_sa:.1f}s (n={_na})" if _a_ok else f"n/a (n={_na})"
+                    _t = f"{_mt:.1f} ± {_st:.1f}s (n={_nt})" if _t_ok else f"n/a (n={_nt})"
+                    f.write(f"{float(_th):<12.1f} {_a:<28} {_t:<28}\n")
+                f.write("\n")
+        except Exception as _e:
+            f.write(f"(Alarm latency summary unavailable: {_e})\n\n")
+
+        f.write("="*80 + "\n")
+        f.write("TPR BY USER\n")
+        f.write("="*80 + "\n")
+        f.write(user_metrics_df.to_string(index=False))
+        f.write("\n\n")
+        
+        f.write("="*80 + "\n")
+        f.write("FAR BY USER\n")
+        f.write("="*80 + "\n")
+        f.write(far_metrics_df.to_string(index=False))
+        f.write("\n\n")
+        
+        f.write("="*80 + "\n")
+        f.write("TPR BY SEIZURE SUBTYPE\n")
+        f.write("="*80 + "\n")
+        f.write(subtype_metrics_df.to_string(index=False))
+        f.write("\n\n")
+
+        # Add TPR by user specifically for Tonic-Clonic seizures
+        seizure_df_local = df[df['ActualLabel'] == 1].copy()
+        tc_seizure_df_local = seizure_df_local[seizure_df_local['SubType'].str.contains('Tonic-Clonic', case=False, na=False)].copy()
+        if len(tc_seizure_df_local) > 0:
+            # Group users consistent with overall rule (<seizure_threshold seizures -> Other)
+            user_seizure_counts_overall = seizure_df_local['UserID'].value_counts()
+            def group_users_tc_local(user_id):
+                if pd.isna(user_id):
+                    return 'Unknown'
+                if user_seizure_counts_overall.get(user_id, 0) < seizure_threshold:
+                    return 'Other'
+                return str(user_id)
+            tc_seizure_df_local['UserGroup'] = tc_seizure_df_local['UserID'].apply(group_users_tc_local)
+
+            tc_user_metrics_local = []
+            for user in sorted(tc_seizure_df_local['UserGroup'].unique()):
+                user_data = tc_seizure_df_local[tc_seizure_df_local['UserGroup'] == user]
+                tp_u = (user_data['ModelPrediction'] == 1).sum()
+                fn_u = (user_data['ModelPrediction'] == 0).sum()
+                tpr_u = tp_u / (tp_u + fn_u) if (tp_u + fn_u) > 0 else 0
+                tc_user_metrics_local.append({
+                    'User': user,
+                    'Seizures': len(user_data),
+                    'TP': tp_u,
+                    'FN': fn_u,
+                    'TPR': tpr_u
+                })
+
+            tc_user_metrics_df_local = pd.DataFrame(tc_user_metrics_local).sort_values('TPR', ascending=False)
+
+            # Overall TPR for Tonic-Clonic seizures
+            tp_tc = (tc_seizure_df_local['ModelPrediction'] == 1).sum()
+            fn_tc = (tc_seizure_df_local['ModelPrediction'] == 0).sum()
+            tpr_tc_overall = tp_tc / (tp_tc + fn_tc) if (tp_tc + fn_tc) > 0 else 0
+
+            f.write("="*80 + "\n")
+            f.write("TPR BY USER (TONIC-CLONIC SUBTYPE)\n")
+            f.write("="*80 + "\n")
+            f.write(f"Tonic-Clonic seizure events: {len(tc_seizure_df_local)} | Overall TPR: {tpr_tc_overall:.3f}\n\n")
+            f.write(tc_user_metrics_df_local.to_string(index=False))
+            f.write("\n\n")
+        else:
+            f.write("="*80 + "\n")
+            f.write("TPR BY USER (TONIC-CLONIC SUBTYPE)\n")
+            f.write("="*80 + "\n")
+            f.write("No Tonic-Clonic seizures present in dataset.\n\n")
+        
+        # Add FALSE NEGATIVES section first (before false alarms)
+        fn_total = ((df['ModelPrediction'] == 0) & (df['ActualLabel'] == 1)).sum()
+        f.write("="*80 + "\n")
+        f.write(f"FALSE NEGATIVES ({fn_total} total)\n")
+        f.write("="*80 + "\n")
+        
+        if len(fn_details_df) > 0:
+            # Format the description column to be more readable (truncate long descriptions)
+            fn_display_df = fn_details_df.copy()
+            fn_display_df['Description'] = fn_display_df['Description'].fillna('').apply(
+                lambda x: (x[:100] + '...') if len(str(x)) > 100 else x
+            )
+            f.write(fn_display_df[['EventID', 'UserID', 'DateTime', 'Type', 'SubType', 'Description']].to_string(index=False))
+            f.write("\n\n")
+        elif len(false_negatives_df) > 0:
+            # Fall back to CSV-based false negatives data if enhanced details not available
+            fn_display_df = false_negatives_df[['EventID', 'UserID', 'Type', 'SubType', 'Description']].copy()
+            fn_display_df['Description'] = fn_display_df['Description'].fillna('').apply(
+                lambda x: (x[:100] + '...') if len(str(x)) > 100 else x
+            )
+            f.write(fn_display_df.to_string(index=False))
+            f.write("\n\n")
+        else:
+            f.write("No false negative details available\n\n")
+        
+        # Add FALSE ALARMS section after false negatives
+        if len(false_alarms_df) > 0:
+            f.write("="*80 + "\n")
+            f.write(f"FALSE ALARMS ({len(false_alarms_df)} total)\n")
+            f.write("="*80 + "\n")
+            f.write(false_alarms_df[['EventID', 'UserID', 'Type', 'SubType', 'MaxSeizureProbability']].to_string(index=False))
+            f.write("\n\n")
+    
+    print(f"Text report saved to: {report_path}")
+    return report_path
+
+
+def main():
+    parser = argparse.ArgumentParser(description='Analyze nnTester event results CSV files')
+    parser.add_argument('csv_file', help='Path to event_results.csv file')
+    parser.add_argument('--output', '-o', default=None, help='Output directory (default: same as input)')
+    parser.add_argument('--seizure-threshold', type=int, default=3, help='Minimum seizures per user to avoid grouping as "Other" (default: 3)')
+    parser.add_argument('--far-threshold', type=int, default=100, help='Minimum non-seizure events per user to avoid grouping as "Other" (default: 100)')
+    parser.add_argument('--alldata-json', default=None, help='Path to allData.json for enhanced false negative reporting')
+    
+    args = parser.parse_args()
+    
+    # Load data
+    df = load_event_results(args.csv_file)
+    
+    # Determine output directory
+    if args.output:
+        output_dir = args.output
+        os.makedirs(output_dir, exist_ok=True)
+    else:
+        output_dir = os.path.dirname(args.csv_file) or '.'
+    
+    # Try to find allData.json if not specified
+    alldata_json_path = args.alldata_json
+    if not alldata_json_path:
+        # Look for allData.json in the same directory as the CSV
+        csv_dir = os.path.dirname(args.csv_file) or '.'
+        potential_json = os.path.join(csv_dir, 'allData.json')
+        if os.path.exists(potential_json):
+            alldata_json_path = potential_json
+    
+    # Load allData.json and extract false negatives details
+    alldata_list = None
+    fn_details_df = pd.DataFrame()
+    if alldata_json_path:
+        alldata_list = load_alldata_json(alldata_json_path)
+        fn_details_df = extract_false_negatives_details(df, alldata_list)
+        print(f"Extracted details for {len(fn_details_df)} false negatives")
+    
+    # Extract false negatives from CSV (same source as false positives)
+    false_negatives_df = df[(df['ActualLabel'] == 1) & (df['ModelPrediction'] == 0)].copy()
+    
+    # Run analyses
+    seizure_df, user_metrics_df, far_metrics_df = analyze_by_user(df, args.seizure_threshold, args.far_threshold)
+    seizure_df_st, subtype_metrics_df = analyze_by_seizure_type(df)
+    false_alarms_df, far_by_subtype_df = analyze_false_alarms(df)
+    
+    # Generate reports
+    generate_text_report(df, user_metrics_df, far_metrics_df, subtype_metrics_df, false_alarms_df, false_negatives_df, fn_details_df, output_dir, args.seizure_threshold, args.far_threshold)
+    generate_plots(df, seizure_df, user_metrics_df, far_metrics_df, subtype_metrics_df, false_alarms_df, false_negatives_df, fn_details_df, output_dir, args.seizure_threshold, args.far_threshold)
+    
+    print("\n" + "="*80)
+    print("Analysis complete!")
+    print("="*80)
+
+
+if __name__ == '__main__':
+    main()

@@ -1,0 +1,27 @@
+DATASET NOCTURNO OSDB V1 — EXTRACCIÓN
+==============================================================================
+
+EVENTOS
+Positivos solicitados: 17
+Positivos encontrados: 17
+Negativos solicitados: 18
+Negativos encontrados: 18
+
+DATAPOINTS rawData[125]
+Positivos: 800
+Negativos: 556
+
+SEIZURE TIMES
+Positivos con seizureTimes válido: 17/17
+
+EVENTOS FALTANTES
+Positivos: ninguno
+Negativos: ninguno
+
+ARCHIVOS
+C:\Users\cesar\osd\dataset_nocturno_osdb_v1\dataset_extraido_v1\osdb_nocturno_tonic_clonic.json
+C:\Users\cesar\osd\dataset_nocturno_osdb_v1\dataset_extraido_v1\osdb_nocturno_false_alarms.json
+
+SIGUIENTE PASO
+Si todos los eventos fueron encontrados y los positivos tienen seizureTimes válidos, preparar el pipeline nocturno TRAIN/VALIDATION/TEST.
+Todavía NO se ha dividido el dataset ni entrenado ningún modelo.

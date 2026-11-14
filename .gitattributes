@@ -1,0 +1,4 @@
+*.csv filter=lfs diff=lfs merge=lfs -text
+BaseDatos/osd/osdb_full_v1.11/osdb_3min_ndaEvents.json filter=lfs diff=lfs merge=lfs -text
+BaseDatos/osd/osdb/osdb_3min_allSeizures.json filter=lfs diff=lfs merge=lfs -text
+BaseDatos/osd/osdb_full_v1.11/osdb_3min_allSeizures.json filter=lfs diff=lfs merge=lfs -text
