@@ -37,6 +37,10 @@
 | 18 | Documentación y presentación final | 13–15 | 6 |
 | **Total** | | | **151 h** |
 
+
+Se utilizó la base de datos de OpenSeizureDetector 
+https://openseizuredetector.org.uk/static/osd_pages/
+
 ## Diagrama de Gantt
 
 
