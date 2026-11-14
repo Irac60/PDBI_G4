@@ -1,0 +1,138 @@
+<html>
+  <head>
+    <meta name="viewport"
+	  content="width=device-width, initial-scale=1, shrink-to-fit=no">    
+    <title>OpenSeizureDetector Event Analysis Summary</title>
+    <script src="../js/jquery-3.6.0.min.js"></script>
+    <script src="../js/popper.min.js"></script>
+    <script src="../js/bootstrap.bundle.min.js"></script>
+    <link rel="stylesheet" href="../css/bootstrap.min.css">
+    <style>
+      table.table { width:auto; }
+    </style>
+  </head>
+  
+  <body>
+    <div class="page-header">
+      <h1>OpenSeizureDetector Event Analysis Summary</h1>
+    </div>
+    <nav class="navbar navbar-expand-lg navbar-light bg-light">
+      <a class="navbar-brand" href="#">OpenSeizureDetector</a>      
+      <div class="collapse navbar-collapse" id="navbarSupportedContent">
+	<ul class="navbar-nav mr-auto">
+	  <li class="nav-item active">
+	    <a class="nav-link" href="#EventDetails">Event Details</a>
+	  </li>
+	  <li class="nav-item">
+	    <a class="nav-link" href="#RawData">Raw Data</a>
+	  </li>
+	  <li class="nav-item">
+	    <a class="nav-link" href="#Analysis">Analysis</a>
+	  </li>
+	</ul>
+      </div>
+    </nav>
+    <h2 id="EventDetails">Event Details</h2>
+    <table class="table table-bordered table-sm">
+      <tr>
+	<th>Event Id</th><td>{{ data.eventId }}</td>
+      </tr>
+      <tr>
+	<th>User Id</th><td>{{ data.userId }}</td>
+      </tr>
+      <tr>
+	<th>Event Date</th><td>{{ data.eventDate }}</td>
+      </tr>
+      <tr>
+	<th>OSD Alarm State</th><td>{{ data.osdAlarmState }}</td>
+      </tr>
+      <tr>
+	<th>Event Type / Subtype</th><td>{{ data.eventType }} / {{ data.eventSubType }}</td>
+      </tr>
+      <tr>
+	<th>Description</th><td>{{ data.eventDesc }}</td>
+      </tr>
+      <tr>
+	<th>Number of Datapoints</th><td>{{ data.nDatapoints }}</td>
+    </table>
+
+    <h3>OSD Settings</h3>
+    <table class="table table-bordered table-sm">
+      <tr>
+            <th>Phone App Version</th>
+	      <th>Data Source</th>
+	      <th>Watch App Version</th>
+      </tr>
+      <tr>
+	      <td>{{ data.phoneAppVersion }}</td>
+	      <td>{{ data.dataSourceName }}</td>
+	      <td>{{ data.watchAppVersion }}</td>
+      </tr>
+      <tr>
+            <th>OSD Alarm Active?</th>
+	      <th>Alarm Frequency Min</th>
+	      <th>Alarm Frequency Max</th>
+	      <th>Alarm Threshold</th>
+	      <th>Alarm Ratio Threshold</th>
+      </tr>
+      <tr>
+            <td>{{ data.osdAlarmActive }}</td>
+	      <td>{{ data.alarmFreqMin }}</td>
+	      <td>{{ data.alarmFreqMax }}</td>
+	      <td>{{ data.alarmThreshold }}</td>
+	      <td>{{ data.alarmRatioThreshold }}</td>
+      </tr>
+      <tr>
+            <th>HR Alarm Active?</th>
+	      <th>HR Threshold Min</th>
+	      <th>HR Threshold Max</th>
+      </tr>
+      <tr>
+            <td>{{ data.hrAlarmActive }}</td>
+	      <td>{{ data.hrThreshMin }}</td>
+	      <td>{{ data.hrThreshMax }}</td>
+      </tr>
+      <tr>
+            <th>HR Adaptive Alarm Active?</th>
+	      <th>HR Adaptive Window</th>
+	      <th>HR Adaptive Threshold</th>
+      </tr>
+      <tr>
+            <td>{{ data.hrAdaptiveAlarmActive }}</td>
+	      <td>{{ data.hrAdaptiveWindow }}</td>
+	      <td>{{ data.hrAdaptiveThreshold }}</td>
+      </tr>
+
+    </table>
+
+    
+    <h2 id="RawData">Raw Data</h2>
+    <img src="rawData.png"/>
+    <img src="hrData.png"/>
+
+    <h2 id="Analysis">Analysis</h2>
+    <table class="table table-bordered table-sm">
+      <tr>
+	<th>Max. ROI Ratio</th><td>{{ "%.2f"|format(data.roiRatioMax) }}</td>
+      </tr>
+      <tr>
+	<th>Max. ROI Ratio<br>(allowing for Threshold)</th><td>{{ "%.2f"|format(data.roiRatioMaxThresholded) }}</td>
+      </tr>
+      <tr>
+	<th>Min ROI Alarm Power</th><td>{{ "%.2f"|format(data.minRoiAlarmPower) }}</td>
+      </tr>
+    </table>
+    <img src="analysis.png"/>
+    <h2>Selected Simplified Spectra</h2>
+    <img src="spectrum.png"/>
+    <h2> Spectral History (vector magnitude and three separate axes)</h2>
+    <img src="spectralHistory.png"/>
+    <h2> Spectral History - all Axes</h2>
+    <p>Note x=red, y=green, z=blue</p>
+    <img src="spectralHistoryColour.png"/>
+
+
+    <p>This page was generated at {{ data.pageDateStr }}.
+    </p>
+  </body>
+</html>

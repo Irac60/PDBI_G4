@@ -1,0 +1,1907 @@
+#!/usr/bin/env python3
+
+import argparse
+from re import X
+import sys
+import os
+import json
+import importlib
+from urllib.parse import _NetlocResultMixinStr
+#from tkinter import Y
+import sklearn.model_selection
+import sklearn.metrics
+import numpy as np
+import matplotlib.pyplot as plt
+import time
+import datetime as dt
+
+import gc
+
+import pandas as pd
+import imblearn
+
+sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..'))
+import libosd.osdDbConnection
+import libosd.dpTools
+import libosd.osdAlgTools
+import libosd.configUtils
+
+
+def calcProcessTime(starttime, cur_iter, max_iter):
+    # From https://stackoverflow.com/questions/44926127/calculating-the-amount-of-time-left-until-completion
+    telapsed = time.time() - starttime
+    testimated = (telapsed/(cur_iter+1))*(max_iter)
+    finishtime = starttime + testimated
+    finishtime = dt.datetime.fromtimestamp(finishtime).strftime("%H:%M:%S")  # in time
+    lefttime = testimated-telapsed  # in seconds
+    iterTime = (telapsed/(cur_iter+1))
+    return (int(telapsed), int(lefttime), finishtime, iterTime)
+
+def type2id(typeStr):
+    if typeStr.lower() == "seizure":
+        id = 1
+    elif typeStr.lower() == "false alarm":
+        id = 0
+    elif typeStr.lower() == "nda":
+        id = 0
+    else:
+        id = 2
+    return id
+
+
+def getUserCounts(df):
+    counts = df['userId'].value_counts()
+    total = counts.sum()
+    props = counts/total
+    return(props)
+
+def analyseDf(df):
+    props=getUserCounts(df)
+    print("analyseDf(): Distribution by user for all data")
+    print(props)
+
+    props=getUserCounts(df[df['type']==1])
+    print("analyseDf(): Distribution by user for seizure data")
+    print(props)
+
+
+
+def loadCsv(inFname, debug=False, dtype=None, usecols=None, low_memory=None):
+    '''
+    loadCsv - read osdb csv file into a pandas dataframe.
+    if inFname is None, reads from stdin.
+
+    Phase 1 optimisation: optional dtype/usecols/low_memory to allow
+    float32 early and avoid loading unused columns. Callers that do not
+    pass these args retain the original float64 behaviour for backward
+    compatibility.
+    '''
+    TAG = "augmentData.loadCsv()"
+    if inFname is not None:
+        print("%s: reading from file %s" % (TAG, inFname))
+        inFile = inFname
+    else:
+        inFile = sys.stdin
+
+    # Build kwargs: only pass dtype/usecols if explicitly provided
+    # to preserve original behaviour when called without optimisation.
+    kwargs = {}
+    if low_memory is not None:
+        kwargs['low_memory'] = low_memory
+    else:
+        kwargs['low_memory'] = False
+    if dtype is not None:
+        kwargs['dtype'] = dtype
+    if usecols is not None:
+        kwargs['usecols'] = usecols
+
+    if kwargs:
+        try:
+            df = pd.read_csv(inFile, **kwargs)
+        except ValueError as e:
+            # Fallback: dtype/usecols may fail if columns not present
+            # (e.g. stale file without X/Y/Z). Retry without optimisation.
+            print(f"{TAG}: WARNING dtype/usecols failed ({e}); retrying without optimisation")
+            df = pd.read_csv(inFile, low_memory=False)
+    else:
+        df = pd.read_csv(inFile, low_memory=False)
+
+    #print(df)
+    if (debug): print("%s: returning %d datapoints" % (TAG, len(df)))
+
+    return(df)
+
+
+def getSeizureNonSeizureDfs(df):
+    ''' returns two datasets, seizure, non-seizure from dataframe df
+    '''
+    seizuresDf = df[df['type']==1]
+    nonSeizureDf = df[df['type']!=1]
+    return (seizuresDf, nonSeizureDf)
+
+
+def _dc_normalisation_enabled(config):
+    """True when flattenData DC normalisation is enabled in the config.
+
+    NOTE (2026-09): dcNormalisation is now a surrogate-only rescale back to a
+    1000 mg baseline - the 1000 mg DC offset is preserved, so augmented data
+    keeps its DC level and the standard magnitude = sqrt(x^2+y^2+z^2)
+    recomputation stays valid.  This helper is retained for backward
+    compatibility (config introspection / tests) but augmentation no longer
+    branches on it.
+    """
+    if not isinstance(config, dict):
+        return False
+    dpCfg = config.get('dataProcessing')
+    if not isinstance(dpCfg, dict):
+        return False
+    return bool(dpCfg.get('dcNormalisation', False))
+
+
+def _valid_concat_1d(values):
+    """Return a concatenated 1D event signal with missing samples dropped.
+
+    Missing accelerometer samples are ignored (the production device
+    concatenates the next valid sample onto the stream); they are never
+    zero-filled, because 0 mg is non-physical for a ~1000 mg sensor and reads
+    as a violent transient. Non-finite values (NaN, +-inf) are dropped.
+    """
+    arr = np.asarray(pd.to_numeric(np.ravel(values), errors='coerce'),
+                     dtype=np.float64)
+    return arr[np.isfinite(arr)]
+
+
+def _valid_concat_3d(x, y, z, mag=None):
+    """Jointly drop sample indices where any of x/y/z (and mag, if given) is missing.
+
+    Returns aligned (x, y, z[, mag]) arrays with identical lengths, so windows
+    sliced from them stay sample-aligned (concatenation semantics, as above).
+    """
+    xa = np.asarray(pd.to_numeric(np.ravel(x), errors='coerce'), dtype=np.float64)
+    ya = np.asarray(pd.to_numeric(np.ravel(y), errors='coerce'), dtype=np.float64)
+    za = np.asarray(pd.to_numeric(np.ravel(z), errors='coerce'), dtype=np.float64)
+    n = min(len(xa), len(ya), len(za))
+    xa, ya, za = xa[:n], ya[:n], za[:n]
+    mask = np.isfinite(xa) & np.isfinite(ya) & np.isfinite(za)
+    if mag is not None:
+        ma = np.asarray(pd.to_numeric(np.ravel(mag), errors='coerce'), dtype=np.float64)
+        mask = mask & np.isfinite(ma[:n])
+        return xa[mask], ya[mask], za[mask], ma[:n][mask]
+    return xa[mask], ya[mask], za[mask]
+
+
+def _build_event_index(df, id_col='eventId'):
+    """Return ordered list of event ids and a mapping id->group DataFrame.
+    Preserves the original order of events as they appear in df.
+    """
+    event_ids = []
+    event_groups = {}
+    # groupby with sort=False preserves first-seen order
+    for eid, grp in df.groupby(id_col, sort=False):
+        event_ids.append(eid)
+        event_groups[eid] = grp
+    return event_ids, event_groups
+
+
+def _make_new_id(orig_id, counter, numeric_max=None):
+    """Generate a new unique id when duplicating events.
+    If orig_id is numeric and numeric_max provided, return numeric id > numeric_max.
+    Otherwise append a suffix to the original id.
+    """
+    try:
+        # treat ints and numpy ints as numeric
+        if numeric_max is not None:
+            return numeric_max + counter
+        # fallback for non-numeric: append suffix
+        return f"{orig_id}__dup{counter}"
+    except Exception:
+        return f"{orig_id}__dup{counter}"
+
+
+
+def userAug(df, config=None):
+    ''' Implement user augmentation to balance seizure events across users.
+    
+    Users with fewer seizure events than the configured threshold are merged into
+    an 'Other' category. All user groups (including 'Other') are then balanced by
+    duplicating events so each group has the same number of seizure events.
+    
+    Args:
+        df (DataFrame): Input dataframe with seizure and non-seizure events
+        config (dict): Configuration object with:
+            - userAugmentationThreshold: Min seizures per user before merging to 'Other'
+    
+    Returns:
+        DataFrame: Augmented dataframe with balanced user groups
+    '''
+    seizuresDf, nonSeizureDf = getSeizureNonSeizureDfs(df)
+    if 'eventId' in seizuresDf.columns:
+        seizuresDf = seizuresDf.copy()
+        seizuresDf['eventId'] = seizuresDf['eventId'].astype(str)
+    if 'eventId' not in seizuresDf.columns:
+        print("userAug(): eventId column missing; returning original dataframe")
+        return df
+
+    # Get threshold from config, default to 10
+    threshold = config.get('dataProcessing', {}).get('userAugmentationThreshold', 10) if config else 10
+
+    # Build event index for seizure events
+    event_ids, event_groups = _build_event_index(seizuresDf, id_col='eventId')
+    if len(event_ids) == 0:
+        return df
+    
+    # Map userId per event (use first row of the event)
+    event_users = {eid: event_groups[eid].iloc[0]['userId'] for eid in event_ids}
+
+    # Count events per user
+    user_event_counts = {}
+    for eid, uid in event_users.items():
+        user_event_counts[uid] = user_event_counts.get(uid, 0) + 1
+
+    print(f"userAug(): User counts before augmentation (threshold={threshold}):")
+    for uid, count in sorted(user_event_counts.items()):
+        print(f"  User {uid}: {count} seizure events")
+
+    # Identify users below threshold and merge them into 'Other'
+    individual_users = [uid for uid, count in user_event_counts.items() if count >= threshold]
+    other_users = [uid for uid, count in user_event_counts.items() if count < threshold]
+    
+    if len(other_users) > 0:
+        print(f"userAug(): Merging {len(other_users)} users below threshold ({threshold}) into 'Other' category")
+        print(f"  Users being merged: {other_users}")
+    
+    # Remap users: individual users stay same, others become 'other'
+    remapped_event_users = {}
+    for eid, uid in event_users.items():
+        if uid in individual_users:
+            remapped_event_users[eid] = uid
+        else:
+            remapped_event_users[eid] = 'other'
+    
+    # Count events per remapped user
+    remapped_user_counts = {}
+    for eid, uid in remapped_event_users.items():
+        remapped_user_counts[uid] = remapped_user_counts.get(uid, 0) + 1
+
+    print(f"userAug(): User/group counts after remapping:")
+    for uid, count in sorted(remapped_user_counts.items(), key=lambda x: (x[0] != 'other', x[0])):
+        print(f"  {uid}: {count} seizure events")
+
+    # Determine target count (max among all remapped users)
+    target_count = max(remapped_user_counts.values()) if remapped_user_counts else 0
+
+    # Keep original events
+    out_groups = []
+    for eid in event_ids:
+        grp = event_groups[eid].copy()
+        remapped_uid = remapped_event_users[eid]
+        # If user was remapped to 'other', update the userId column in the dataframe
+        if remapped_uid == 'other':
+            grp['userId'] = 'other'
+        out_groups.append(grp)
+
+    # Track duplicates for synthetic event ID generation
+    dup_counters = {eid: 0 for eid in event_ids}
+    
+    # Group events by remapped user for sampling
+    events_by_remapped_user = {}
+    for eid, uid in remapped_event_users.items():
+        events_by_remapped_user.setdefault(uid, []).append(eid)
+
+    # Use config randomSeed if provided, else random; respects centralized seeding.
+    # Try to get seed from config's randomSeed (top-level), fallback to 42 for backward compat if config missing.
+    _seed = None
+    if isinstance(config, dict) and 'randomSeed' in config:
+        _raw = config.get('randomSeed')
+        if _raw is not None:
+            try:
+                _seed = int(_raw)
+            except Exception:
+                _seed = None
+        else:
+            _seed = None  # null -> random
+    else:
+        # No config or no key: try global np seed? fallback to 42 for reproducibility
+        _seed = 42
+    if _seed is None:
+        rng = np.random.default_rng()  # non-deterministic
+    else:
+        rng = np.random.default_rng(_seed)
+    
+    # For each user group, duplicate events until reaching target count
+    for uid, count in remapped_user_counts.items():
+        needed = target_count - count
+        if needed <= 0:
+            continue
+        
+        print(f"userAug(): Duplicating {needed} events for user/group '{uid}' (from {count} to {target_count})")
+        user_events = events_by_remapped_user[uid]
+        
+        for _ in range(needed):
+            # Sample an event from this user (with replacement)
+            src_event = rng.choice(user_events)
+            dup_counters[src_event] += 1
+            synthetic_id = f"{src_event}-dup{dup_counters[src_event]}"
+            grp_copy = event_groups[src_event].copy()
+            grp_copy['eventId'] = synthetic_id
+            # Update userId if this event's user was remapped to 'other'
+            if remapped_event_users[src_event] == 'other':
+                grp_copy['userId'] = 'other'
+            out_groups.append(grp_copy)
+
+    # Combine augmented seizure data
+    xResamp = pd.concat(out_groups, ignore_index=True)
+
+    print("userAug(): User/group distribution AFTER user augmentation:")
+    analyseDf(xResamp)
+    
+    # Combine with non-seizure data
+    df = pd.concat([nonSeizureDf, xResamp], ignore_index=True)
+    return df
+
+
+def noiseAug(df, noiseAugVal, noiseAugFac, debug=False, config=None):
+    ''' Implement noise augmentation of seizure events in dataframe df
+     It expects df to be a pandas dataframe representation of a flattened osdb dataset.
+     noiseAugVal is the amplitude (in mg) of the noise applied.
+     noiseAugFac is the number of *new events* generated for each input event.
+     Each augmented event keeps the same number of rows as the source event.
+     If 3D acceleration data exists and is non-zero, applies noise to X, Y, Z components
+     and recalculates magnitude. Otherwise, applies noise directly to magnitude.
+     (Flattened data retains its ~1000 mg DC offset under the current
+     surrogate-only dcNormalisation, so the sqrt recomputation stays valid.)
+    '''
+    tStart = time.time()
+    seizuresDf, nonSeizureDf = getSeizureNonSeizureDfs(df)
+    if 'eventId' in seizuresDf.columns:
+        seizuresDf = seizuresDf.copy()
+        seizuresDf['eventId'] = seizuresDf['eventId'].astype(str)
+    else:
+        print("noiseAug(): ERROR: eventId column missing - can not group by eventId")
+        exit(-1)
+    if(debug): print(seizuresDf.columns)
+    accStartCol = seizuresDf.columns.get_loc('M001')-1
+    accEndCol = seizuresDf.columns.get_loc('M124')+1
+    eventIdCol = seizuresDf.columns.get_loc('eventId')
+
+    # Check if 3D acceleration columns exist in the dataframe
+    has3DColumns = 'X000' in seizuresDf.columns and 'Y000' in seizuresDf.columns and 'Z000' in seizuresDf.columns
+    accXStartCol, accXEndCol, accYStartCol, accYEndCol, accZStartCol, accZEndCol = None, None, None, None, None, None
+    if has3DColumns:
+        accXStartCol = seizuresDf.columns.get_loc('X000')
+        accXEndCol = seizuresDf.columns.get_loc('X124') + 1
+        accYStartCol = seizuresDf.columns.get_loc('Y000')
+        accYEndCol = seizuresDf.columns.get_loc('Y124') + 1
+        accZStartCol = seizuresDf.columns.get_loc('Z000')
+        accZEndCol = seizuresDf.columns.get_loc('Z124') + 1
+        print("noiseAug(): 3D acceleration columns detected - will check each event for 3D data")
+
+    event_ids, event_groups = _build_event_index(seizuresDf, id_col='eventId')
+    if len(event_ids) == 0:
+        return df
+    print("noiseAug(): Augmenting %d seizure events with factor %d" % (len(event_ids), noiseAugFac))
+
+    out_groups = []
+    processed_events = 0
+    for eid in event_ids:
+        grp = event_groups[eid]
+        out_groups.append(grp.copy())  # keep original event
+
+        # Check if this event has valid 3D data (per event).  Use max |value|
+        # rather than sum so near-symmetric oscillations still count.
+        # stack() drops NaN, so missing samples never count as data.
+        use3D_event = False
+        if has3DColumns:
+            # Evaluate 3D data across the whole event
+            accX_vals = pd.to_numeric(grp.iloc[:, accXStartCol:accXEndCol].stack(), errors='coerce')
+            accY_vals = pd.to_numeric(grp.iloc[:, accYStartCol:accYEndCol].stack(), errors='coerce')
+            accZ_vals = pd.to_numeric(grp.iloc[:, accZStartCol:accZEndCol].stack(), errors='coerce')
+            use3D_event = (accX_vals.abs().max() > 0 or accY_vals.abs().max() > 0 or accZ_vals.abs().max() > 0)
+
+        for dup in range(1, noiseAugFac + 1):
+            aug_rows = []
+            for _, row in grp.iterrows():
+                outRow = []
+                # Copy metadata columns
+                for i in range(0, accStartCol):
+                    if i == eventIdCol:
+                        outRow.append(f"{eid}-{dup}")
+                    else:
+                        outRow.append(row.iloc[i])
+
+                if use3D_event:
+                    # Apply noise to 3D acceleration and recalculate magnitude.
+                    # Missing samples stay missing (NaN propagates through the
+                    # noise addition and sqrt) so the downstream rolling buffer
+                    # concatenates across the hole; never zero-filled.
+                    xArr = pd.to_numeric(row.iloc[accXStartCol:accXEndCol], errors='coerce').to_numpy(dtype=np.float64)
+                    yArr = pd.to_numeric(row.iloc[accYStartCol:accYEndCol], errors='coerce').to_numpy(dtype=np.float64)
+                    zArr = pd.to_numeric(row.iloc[accZStartCol:accZEndCol], errors='coerce').to_numpy(dtype=np.float64)
+
+                    noiseX = np.random.normal(0, noiseAugVal, xArr.shape)
+                    noiseY = np.random.normal(0, noiseAugVal, yArr.shape)
+                    noiseZ = np.random.normal(0, noiseAugVal, zArr.shape)
+
+                    xAugmented = xArr + noiseX
+                    yAugmented = yArr + noiseY
+                    zAugmented = zArr + noiseZ
+
+                    magAugmented = np.sqrt(xAugmented**2.0 + yAugmented**2.0 + zAugmented**2.0)
+
+                    outRow.extend(magAugmented.tolist())
+                    outRow.extend(xAugmented.tolist())
+                    outRow.extend(yAugmented.tolist())
+                    outRow.extend(zAugmented.tolist())
+
+                    # Append any remaining columns after acceleration data (e.g., note)
+                    for i in range(accZEndCol, len(row)):
+                        outRow.append(row.iloc[i])
+                else:
+                    # Magnitude-only path: coerce to float (None/strings -> NaN);
+                    # NaN propagates through the noise addition (missing stays
+                    # missing, never zero-filled).
+                    accArr = row.iloc[accStartCol:accEndCol]
+                    inArr = pd.to_numeric(accArr, errors='coerce').to_numpy(dtype=np.float64)
+                    noiseArr = np.random.normal(0, noiseAugVal, inArr.shape)
+                    outArr = inArr + noiseArr
+
+                    outRow.extend(outArr.tolist())
+
+                    for i in range(accEndCol, len(row)):
+                        outRow.append(row.iloc[i])
+
+                aug_rows.append(outRow)
+
+            aug_group = pd.DataFrame(aug_rows, columns=seizuresDf.columns)
+            out_groups.append(aug_group)
+
+        processed_events += 1
+        if processed_events % 50 == 0:
+            tElapsed, tRem, tCompletion, tIter = calcProcessTime(tStart, processed_events, len(event_ids))
+            sys.stdout.write("events=%d, tIter=%.1f ms, elapsed: %s(s), time left: %s(s), estimated finish time: %s\r" % (processed_events, tIter*1000., tElapsed, tRem, tCompletion))
+            sys.stdout.flush()
+            gc.collect()
+
+    print("")  # terminate the carriage-return progress line above
+    print("noiseAug() - Creating dataframe")
+    sys.stdout.flush()
+    gc.collect()
+    if len(out_groups) > 0:
+        augDf = pd.concat(out_groups, ignore_index=True)
+    else:
+        augDf = seizuresDf
+    if (debug): print("noiseAug() - augDf=", augDf)
+    if (debug): print("noiseAug() nonSeizureDf=", nonSeizureDf)
+
+    print("noiseAug() - Concatenating dataframe")
+    sys.stdout.flush()
+    df = pd.concat([augDf, nonSeizureDf], ignore_index=True)
+    if (debug): print("df=",df)
+    return(df)
+
+
+def _seeded_rng(config, default_seed=42):
+    '''Return np.random.default_rng seeded from config top-level randomSeed.
+
+    Mirrors the userAug() convention: int seed -> deterministic generator,
+    None/missing key handling -> default_seed for backward compatibility,
+    explicit null -> non-deterministic generator.
+    '''
+    _seed = default_seed
+    if isinstance(config, dict) and 'randomSeed' in config:
+        _raw = config.get('randomSeed')
+        if _raw is None:
+            return np.random.default_rng()  # null -> random
+        try:
+            _seed = int(_raw)
+        except Exception:
+            return np.random.default_rng()  # unparseable -> random
+    return np.random.default_rng(_seed)
+
+
+def dcOffsetAug(df, dcOffsetMax, dcOffsetFactor, debug=False, config=None):
+    '''DC-offset augmentation: per-event random sensor-bias shifts.
+
+    Adds `dcOffsetFactor` shifted copies of EVERY event (seizure and
+    non-seizure alike). Each copy gets a SINGLE random offset applied to all
+    of its datapoints, mimicking device/user sensor bias (constant over an
+    event). This teaches the model invariance to absolute DC level so it must
+    rely on movement dynamics instead of "level ~= 1000 mg".
+
+    - Magnitude path: M += o with o ~ Uniform(-dcOffsetMax, +dcOffsetMax) mg,
+      clipped at 0 (magnitudes cannot be negative).
+    - 3D path (event has non-zero X/Y/Z columns): a random bias vector b with
+      |b| <= dcOffsetMax along a uniform random direction is added to X, Y, Z
+      and magnitude is recomputed (mirrors noiseAug 3D handling).
+    - Originals are kept; copies get eventId "{eid}-dc{dup}"; class labels and
+      all metadata are preserved (only accel samples change).
+    - Deterministic when config randomSeed is set (same pattern as userAug).
+
+    Args:
+        df: flattened osdb dataframe (trainData.csv layout).
+        dcOffsetMax: max |offset| in mg (e.g. 50.0 covers observed device bias).
+        dcOffsetFactor: number of shifted copies per event (0 disables).
+        debug: verbose output.
+        config: full config object (for randomSeed).
+
+    Returns:
+        DataFrame with originals plus shifted copies.
+    '''
+    try:
+        dcOffsetFactor = int(dcOffsetFactor)
+    except Exception:
+        dcOffsetFactor = 0
+    try:
+        dcOffsetMax = float(dcOffsetMax)
+    except Exception:
+        dcOffsetMax = 0.0
+    if dcOffsetFactor <= 0 or dcOffsetMax <= 0:
+        if debug:
+            print("dcOffsetAug(): disabled (factor=%s, max=%s); returning input unchanged"
+                  % (dcOffsetFactor, dcOffsetMax))
+        return df
+
+    tStart = time.time()
+    workDf = df.copy()
+    if 'eventId' in workDf.columns:
+        workDf['eventId'] = workDf['eventId'].astype(str)
+    else:
+        print("dcOffsetAug(): ERROR: eventId column missing - can not group by eventId")
+        exit(-1)
+    try:
+        accStartCol = workDf.columns.get_loc('M001') - 1
+        accEndCol = workDf.columns.get_loc('M124') + 1
+    except Exception:
+        print("dcOffsetAug(): ERROR: M000..M124 magnitude columns missing")
+        exit(-1)
+    eventIdCol = workDf.columns.get_loc('eventId')
+
+    has3DColumns = 'X000' in workDf.columns and 'Y000' in workDf.columns and 'Z000' in workDf.columns
+    accXStartCol, accXEndCol, accYStartCol, accYEndCol, accZStartCol, accZEndCol = None, None, None, None, None, None
+    if has3DColumns:
+        accXStartCol = workDf.columns.get_loc('X000')
+        accXEndCol = workDf.columns.get_loc('X124') + 1
+        accYStartCol = workDf.columns.get_loc('Y000')
+        accYEndCol = workDf.columns.get_loc('Y124') + 1
+        accZStartCol = workDf.columns.get_loc('Z000')
+        accZEndCol = workDf.columns.get_loc('Z124') + 1
+        print("dcOffsetAug(): 3D acceleration columns detected - will check each event for 3D data")
+
+    event_ids, event_groups = _build_event_index(workDf, id_col='eventId')
+    if len(event_ids) == 0:
+        return df
+    print("dcOffsetAug(): Shifting %d events (both classes) with factor %d, max |offset| %.1f mg"
+          % (len(event_ids), dcOffsetFactor, dcOffsetMax))
+
+    rng = _seeded_rng(config)
+
+    out_groups = []
+    processed_events = 0
+    for eid in event_ids:
+        grp = event_groups[eid]
+        out_groups.append(grp.copy())  # keep original event
+
+        # Per-event 3D availability check (mirrors noiseAug; stack() drops
+        # NaN so missing samples never count as data).
+        use3D_event = False
+        if has3DColumns:
+            accX_vals = pd.to_numeric(grp.iloc[:, accXStartCol:accXEndCol].stack(), errors='coerce')
+            accY_vals = pd.to_numeric(grp.iloc[:, accYStartCol:accYEndCol].stack(), errors='coerce')
+            accZ_vals = pd.to_numeric(grp.iloc[:, accZStartCol:accZEndCol].stack(), errors='coerce')
+            use3D_event = (accX_vals.abs().max() > 0 or accY_vals.abs().max() > 0 or accZ_vals.abs().max() > 0)
+
+        for dup in range(1, dcOffsetFactor + 1):
+            # ONE offset per event copy (device bias is constant over an event,
+            # not per-datapoint - per-datapoint shifts would fake movement).
+            offset = float(rng.uniform(-dcOffsetMax, dcOffsetMax))
+            if use3D_event:
+                direction = rng.normal(0, 1, 3)
+                norm = float(np.linalg.norm(direction))
+                bias = direction / norm * offset if norm > 0 else np.zeros(3)
+            else:
+                bias = None
+
+            aug_rows = []
+            for _, row in grp.iterrows():
+                outRow = []
+                # Copy metadata columns (synthetic eventId for the copy)
+                for i in range(0, accStartCol):
+                    if i == eventIdCol:
+                        outRow.append(f"{eid}-dc{dup}")
+                    else:
+                        outRow.append(row.iloc[i])
+
+                if use3D_event:
+                    # Missing samples stay missing (NaN propagates); never zero-filled.
+                    xArr = pd.to_numeric(row.iloc[accXStartCol:accXEndCol], errors='coerce').to_numpy(dtype=np.float64)
+                    yArr = pd.to_numeric(row.iloc[accYStartCol:accYEndCol], errors='coerce').to_numpy(dtype=np.float64)
+                    zArr = pd.to_numeric(row.iloc[accZStartCol:accZEndCol], errors='coerce').to_numpy(dtype=np.float64)
+                    xAugmented = xArr + bias[0]
+                    yAugmented = yArr + bias[1]
+                    zAugmented = zArr + bias[2]
+                    magAugmented = np.sqrt(xAugmented**2.0 + yAugmented**2.0 + zAugmented**2.0)
+                    outRow.extend(magAugmented.tolist())
+                    outRow.extend(xAugmented.tolist())
+                    outRow.extend(yAugmented.tolist())
+                    outRow.extend(zAugmented.tolist())
+                    for i in range(accZEndCol, len(row)):
+                        outRow.append(row.iloc[i])
+                else:
+                    # NaN + offset stays NaN (np.clip propagates it): missing
+                    # stays missing, never zero-filled.
+                    inArr = pd.to_numeric(row.iloc[accStartCol:accEndCol], errors='coerce').to_numpy(dtype=np.float64)
+                    outArr = np.clip(inArr + offset, 0.0, None)
+                    outRow.extend(outArr.tolist())
+                    for i in range(accEndCol, len(row)):
+                        outRow.append(row.iloc[i])
+
+                aug_rows.append(outRow)
+
+            aug_group = pd.DataFrame(aug_rows, columns=workDf.columns)
+            out_groups.append(aug_group)
+
+        processed_events += 1
+        if processed_events % 50 == 0:
+            tElapsed, tRem, tCompletion, tIter = calcProcessTime(tStart, processed_events, len(event_ids))
+            sys.stdout.write("events=%d, tIter=%.1f ms, elapsed: %s(s), time left: %s(s), estimated finish time: %s\r" % (processed_events, tIter*1000., tElapsed, tRem, tCompletion))
+            sys.stdout.flush()
+            gc.collect()
+
+    print("")  # terminate the carriage-return progress line above
+    print("dcOffsetAug() - Creating dataframe")
+    sys.stdout.flush()
+    gc.collect()
+    if len(out_groups) > 0:
+        outDf = pd.concat(out_groups, ignore_index=True)
+    else:
+        outDf = workDf
+    return outDf
+
+
+def _resample_1d_linear(values, new_len):
+    """Linearly resample a 1D numeric array to new_len samples."""
+    arr = np.asarray(values, dtype=np.float64)
+    old_len = len(arr)
+    if old_len == 0 or new_len <= 0:
+        return np.array([], dtype=np.float64)
+    if old_len == new_len:
+        return arr.copy()
+    if old_len == 1:
+        return np.full((new_len,), arr[0], dtype=np.float64)
+
+    old_x = np.linspace(0.0, 1.0, old_len)
+    new_x = np.linspace(0.0, 1.0, new_len)
+    return np.interp(new_x, old_x, arr)
+
+
+def _normalise_match_value(value):
+    if value is None:
+        return None
+    return str(value).strip().lower()
+
+
+def _normalise_match_set(values):
+    if values is None:
+        return set()
+    if not isinstance(values, (list, tuple, set)):
+        values = [values]
+    return {_normalise_match_value(v) for v in values if _normalise_match_value(v) is not None}
+
+
+def _type_matches(type_val, target_types):
+    if len(target_types) == 0:
+        return True
+    type_norm = _normalise_match_value(type_val)
+    if type_norm in target_types:
+        return True
+    try:
+        type_int = int(float(type_val))
+        if str(type_int) in target_types:
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _subtype_matches(subtype_val, target_subtypes):
+    if len(target_subtypes) == 0:
+        return True
+    subtype_norm = _normalise_match_value(subtype_val)
+    return subtype_norm in target_subtypes
+
+
+def _parse_per_pair_factor(raw):
+    if raw is None:
+        return None
+    try:
+        iv = int(float(str(raw).strip()))
+        return iv
+    except Exception:
+        return None
+
+
+def _parse_per_pair_value(raw):
+    if raw is None:
+        return None
+    try:
+        fv = float(str(raw).strip())
+        return fv
+    except Exception:
+        return None
+
+
+def _normalise_type_subtype_pairs(type_subtype_pairs):
+    """Normalise selector pairs into [{'type': <str|None>, 'subType': <str|None>, 'factor': int|None, 'value': float|None}, ...].
+
+    Per-pair ``factor`` and ``value`` keys allow hard-negative mining style
+    selective augmentation: e.g. ``{"type":0,"subType":"Sorting","factor":5,"value":8.0}``.
+    Supported factor keys: ``factor``, ``noiseAugmentationFactor``, ``noiseFactor``, ``augmentationFactor``.
+    Supported value keys: ``value``, ``noiseValue``, ``noiseAugmentationValue``, ``augmentationValue``.
+    When ``factor``/``value`` are absent (None) the caller falls back to the global
+    ``noiseAugmentationNonSeizureFactor``/``Value``.
+    When explicitly set to 0, that subtype is suppressed even if global factor >0.
+    """
+    norm_pairs = []
+    if type_subtype_pairs is None:
+        return norm_pairs
+
+    if isinstance(type_subtype_pairs, dict):
+        type_subtype_pairs = [type_subtype_pairs]
+
+    for pair in type_subtype_pairs:
+        type_val = None
+        subtype_val = None
+        factor_raw = None
+        value_raw = None
+        has_factor_key = False
+        has_value_key = False
+        if isinstance(pair, dict):
+            type_val = pair.get('type', pair.get('Type', None))
+            subtype_val = pair.get('subType', pair.get('subtype', pair.get('value', pair.get('Value', None))))
+            # Detect per-pair factor overrides (first matching key wins)
+            for k in ('factor', 'noiseAugmentationFactor', 'noiseFactor', 'augmentationFactor', 'noiseAugmentationNonSeizureFactor'):
+                if k in pair:
+                    factor_raw = pair[k]
+                    has_factor_key = True
+                    break
+            # Prefer explicit noise/value keys; fall back to generic 'value' only if dict has explicit type/subType keys
+            for k in ('noiseAugmentationValue', 'noiseValue', 'augmentationValue', 'noiseAugmentationNonSeizureValue'):
+                if k in pair:
+                    value_raw = pair[k]
+                    has_value_key = True
+                    break
+            if not has_value_key:
+                # Generic 'value' as per-pair noise value – only if dict has type/subType keys explicitly
+                if 'value' in pair and ('type' in pair or 'Type' in pair or 'subType' in pair or 'subtype' in pair):
+                    value_raw = pair['value']
+                    has_value_key = True
+                elif 'Value' in pair and ('type' in pair or 'Type' in pair or 'subType' in pair or 'subtype' in pair):
+                    value_raw = pair['Value']
+                    has_value_key = True
+        elif isinstance(pair, (list, tuple)) and len(pair) >= 2:
+            type_val = pair[0]
+            subtype_val = pair[1]
+            # Tuple form does not support per-pair factor/value
+        else:
+            continue
+
+        entry = {
+            'type': _normalise_match_value(type_val),
+            'subType': _normalise_match_value(subtype_val),
+            'factor': _parse_per_pair_factor(factor_raw) if has_factor_key else None,
+            'value': _parse_per_pair_value(value_raw) if has_value_key else None,
+        }
+        norm_pairs.append(entry)
+
+    return norm_pairs
+
+
+def _extract_subtype_from_row(row, subtype_col):
+    """Extract subtype from row, falling back to typeStr if subType column absent.
+
+    The flattened CSV (flattenData.py:333) encodes subtype in ``typeStr`` as
+    ``\"type/subType\"`` without a separate ``subType`` column. This helper
+    transparently supports both layouts.
+    """
+    if subtype_col is not None and subtype_col in row.index:
+        val = row[subtype_col]
+        if pd.notna(val) and str(val).strip() not in ("", "nan", "None"):
+            return val
+    # Fallback: parse from typeStr like '"Seizure/Other"' or 'False Alarm/Sorting'
+    if 'typeStr' in row.index:
+        ts = row['typeStr']
+        if pd.notna(ts):
+            ts_str = str(ts).strip()
+            # Remove surrounding quotes added by flattenData
+            if (ts_str.startswith('"') and ts_str.endswith('"')) or (ts_str.startswith("'") and ts_str.endswith("'")):
+                ts_str = ts_str[1:-1]
+            if '/' in ts_str:
+                _, sub = ts_str.split('/', 1)
+                sub = sub.strip().strip('"').strip("'")
+                if sub:
+                    return sub
+    return None
+
+
+def _matches_type_subtype_pair(event_type, event_subtype, pair):
+    event_type_norm = _normalise_match_value(event_type)
+    event_subtype_norm = _normalise_match_value(event_subtype)
+
+    pair_type = pair.get('type')
+    pair_subtype = pair.get('subType')
+
+    type_ok = True
+    if pair_type not in [None, '']:
+        type_ok = (event_type_norm == pair_type)
+        if not type_ok:
+            try:
+                event_type_int = int(float(event_type))
+                type_ok = (str(event_type_int) == pair_type)
+            except Exception:
+                type_ok = False
+
+    subtype_ok = True
+    if pair_subtype not in [None, '']:
+        subtype_ok = (event_subtype_norm == pair_subtype)
+
+    return type_ok and subtype_ok
+
+
+def sampleRateAug(df, sampleRateFactors, debug=False, config=None):
+    '''
+    Apply sample-rate augmentation to seizure events by resampling each event's
+    concatenated acceleration signal and then rebuilding it into 125-sample rows.
+
+    sampleRateFactors are multiplicative ratios relative to the original sample
+    density (e.g. 0.8 compresses samples, 1.2 stretches samples).
+    '''
+    seizuresDf, nonSeizureDf = getSeizureNonSeizureDfs(df)
+    if len(seizuresDf) == 0:
+        return df
+
+    if 'eventId' in seizuresDf.columns:
+        seizuresDf = seizuresDf.copy()
+        seizuresDf['eventId'] = seizuresDf['eventId'].astype(str)
+    else:
+        print("sampleRateAug(): ERROR: eventId column missing.")
+        return df
+
+    factors = []
+    for f in sampleRateFactors if sampleRateFactors is not None else []:
+        try:
+            ratio = float(f)
+        except Exception:
+            continue
+        if ratio <= 0:
+            continue
+        if np.isclose(ratio, 1.0):
+            continue
+        factors.append(ratio)
+
+    if len(factors) == 0:
+        if debug:
+            print("sampleRateAug(): No valid non-unity sampleRateFactors provided; skipping.")
+        return df
+
+    accStartCol = seizuresDf.columns.get_loc('M001')-1
+    accEndCol = seizuresDf.columns.get_loc('M124')+1
+    eventIdCol = seizuresDf.columns.get_loc('eventId')
+    acc_len = accEndCol - accStartCol
+
+    has3DColumns = 'X000' in seizuresDf.columns and 'Y000' in seizuresDf.columns and 'Z000' in seizuresDf.columns
+    accXStartCol = accXEndCol = accYStartCol = accYEndCol = accZStartCol = accZEndCol = None
+    if has3DColumns:
+        accXStartCol = seizuresDf.columns.get_loc('X000')
+        accXEndCol = seizuresDf.columns.get_loc('X124') + 1
+        accYStartCol = seizuresDf.columns.get_loc('Y000')
+        accYEndCol = seizuresDf.columns.get_loc('Y124') + 1
+        accZStartCol = seizuresDf.columns.get_loc('Z000')
+        accZEndCol = seizuresDf.columns.get_loc('Z124') + 1
+
+    event_ids, event_groups = _build_event_index(seizuresDf, id_col='eventId')
+    # --- Console output: start summary ---
+    n_seiz_events_before = len(event_ids)
+    n_seiz_dp_before = len(seizuresDf)
+    n_non_seiz_events = len(_build_event_index(nonSeizureDf, id_col='eventId')[0]) if 'eventId' in nonSeizureDf.columns and len(nonSeizureDf) > 0 else 0
+    n_non_seiz_dp = len(nonSeizureDf)
+    # Build human-readable factor labels for suffix echo
+    factor_labels = [f"{f:.3f}".rstrip('0').rstrip('.').replace('.', 'p') for f in factors]
+    suffixes = ", ".join([f"'-sr{lbl}'" for lbl in factor_labels])
+    print(f"sampleRateAug(): Starting with {n_seiz_events_before} seizure events ({n_seiz_dp_before} datapoints), {n_non_seiz_events} non-seizure events ({n_non_seiz_dp} datapoints)")
+    print(f"sampleRateAug(): Sample-rate factors: {factors}  (suffixes: {suffixes}, e.g. '{event_ids[0] if event_ids else 'EID'}-sr{factor_labels[0] if factor_labels else 'X'}')")
+    out_groups = [event_groups[eid].copy() for eid in event_ids]
+
+    for eid in event_ids:
+        grp = event_groups[eid]
+        base_row = grp.iloc[0]
+
+        # Concatenated event signals with missing samples dropped (never
+        # zero-filled): the next valid sample concatenates on, matching the
+        # production device.  3D axes share one joint valid mask so windows
+        # sliced from them stay sample-aligned.
+        mag_raw = pd.to_numeric(grp.iloc[:, accStartCol:accEndCol].to_numpy().reshape(-1), errors='coerce')
+        x_raw = pd.to_numeric(grp.iloc[:, accXStartCol:accXEndCol].to_numpy().reshape(-1), errors='coerce') if has3DColumns else None
+        y_raw = pd.to_numeric(grp.iloc[:, accYStartCol:accYEndCol].to_numpy().reshape(-1), errors='coerce') if has3DColumns else None
+        z_raw = pd.to_numeric(grp.iloc[:, accZStartCol:accZEndCol].to_numpy().reshape(-1), errors='coerce') if has3DColumns else None
+
+        use3D_event = False
+        x_concat = y_concat = z_concat = None
+        if has3DColumns:
+            # nanmax(initial=0): all-missing axes read as 0, never as data.
+            use3D_event = (np.nanmax(np.abs(x_raw), initial=0.0) > 0 or
+                           np.nanmax(np.abs(y_raw), initial=0.0) > 0 or
+                           np.nanmax(np.abs(z_raw), initial=0.0) > 0)
+        if use3D_event:
+            x_concat, y_concat, z_concat, mag_concat = _valid_concat_3d(x_raw, y_raw, z_raw, mag_raw)
+        else:
+            mag_concat = _valid_concat_1d(mag_raw)
+        if len(mag_concat) == 0:
+            continue  # event has no usable samples after dropping missing data
+
+        for factor in factors:
+            new_len = int(np.round(len(mag_concat) * factor))
+            if new_len < acc_len:
+                continue
+
+            n_windows = new_len // acc_len
+            if n_windows == 0:
+                continue
+
+            if use3D_event:
+                x_resampled = _resample_1d_linear(x_concat, new_len)
+                y_resampled = _resample_1d_linear(y_concat, new_len)
+                z_resampled = _resample_1d_linear(z_concat, new_len)
+                mag_resampled = np.sqrt(x_resampled**2.0 + y_resampled**2.0 + z_resampled**2.0)
+            else:
+                mag_resampled = _resample_1d_linear(mag_concat, new_len)
+                x_resampled = y_resampled = z_resampled = None
+
+            usable_len = n_windows * acc_len
+            mag_resampled = mag_resampled[:usable_len]
+            if use3D_event:
+                x_resampled = x_resampled[:usable_len]
+                y_resampled = y_resampled[:usable_len]
+                z_resampled = z_resampled[:usable_len]
+
+            factor_label = f"{factor:.3f}".rstrip('0').rstrip('.').replace('.', 'p')
+            synthetic_id = f"{eid}-sr{factor_label}"
+            aug_rows = []
+            for w in range(n_windows):
+                start = w * acc_len
+                end = start + acc_len
+                outRow = []
+                for i in range(0, accStartCol):
+                    if i == eventIdCol:
+                        outRow.append(synthetic_id)
+                    else:
+                        outRow.append(base_row.iloc[i])
+
+                outRow.extend(mag_resampled[start:end].tolist())
+
+                if use3D_event:
+                    outRow.extend(x_resampled[start:end].tolist())
+                    outRow.extend(y_resampled[start:end].tolist())
+                    outRow.extend(z_resampled[start:end].tolist())
+
+                endCol = accZEndCol if use3D_event else accEndCol
+                for i in range(endCol, len(base_row)):
+                    outRow.append(base_row.iloc[i])
+
+                aug_rows.append(outRow)
+
+            if len(aug_rows) > 0:
+                out_groups.append(pd.DataFrame(aug_rows, columns=seizuresDf.columns))
+
+    augDf = pd.concat(out_groups, ignore_index=True)
+    df = pd.concat([augDf, nonSeizureDf], ignore_index=True)
+    # --- Console output: summary before/after ---
+    n_seiz_events_after = len(_build_event_index(augDf, id_col='eventId')[0]) if len(augDf) > 0 else 0
+    n_seiz_dp_after = len(augDf)
+    n_added_events = n_seiz_events_after - n_seiz_events_before
+    n_added_dp = n_seiz_dp_after - n_seiz_dp_before
+    print(f"sampleRateAug(): Completed – seizure events before: {n_seiz_events_before}, after: {n_seiz_events_after} (added {n_added_events} events, {n_added_dp} datapoints)")
+    print(f"sampleRateAug(): Augmented eventId suffix: '-sr{{factor}}'  e.g. '-sr{factor_labels[0] if factor_labels else 'X'}'  factors {factors} -> suffixes {suffixes}")
+    print(f"sampleRateAug(): Non-seizure events unchanged: {n_non_seiz_events} events")
+    return df
+
+
+def _resolve_non_seizure_aug_params(matching_pairs, default_factor, default_value):
+    """Resolve effective factor/value for an event matching one or more selector pairs.
+
+    Returns (effective_factor:int, effective_value:float). The first matching pair
+    with an explicit override wins; otherwise falls back to defaults.
+    If multiple pairs match, the first pair with a non-None override is used.
+    """
+    eff_factor = None
+    eff_value = None
+    for p in matching_pairs:
+        if eff_factor is None and p.get('factor') is not None:
+            eff_factor = p['factor']
+        if eff_value is None and p.get('value') is not None:
+            eff_value = p['value']
+        if eff_factor is not None and eff_value is not None:
+            break
+    if eff_factor is None:
+        eff_factor = default_factor
+    if eff_value is None:
+        eff_value = default_value
+    # Coerce to correct types
+    try:
+        eff_factor = int(eff_factor)
+    except Exception:
+        eff_factor = 0
+    try:
+        eff_value = float(eff_value)
+    except Exception:
+        eff_value = 0.0
+    return eff_factor, eff_value
+
+
+def noiseAugNonSeizure(df, noiseAugVal, noiseAugFac, targetTypeSubTypePairs=None, debug=False, config=None):
+    '''
+    Apply noise augmentation to selected non-seizure events.
+    Selection is event-level and filtered by explicit type/subType pairs.
+
+    Each entry in ``targetTypeSubTypePairs`` may optionally include ``factor``
+    and ``value`` (or aliases ``noiseAugmentationFactor``/``noiseAugmentationValue``)
+    to override the global ``noiseAugFac``/``noiseAugVal`` for that specific
+    subtype. This enables hard-negative mining style selective augmentation,
+    e.g. augmenting ``Sorting`` 5x and ``Motor Vehicle`` 8x while leaving
+    ``Unknown`` at the default.
+    '''
+    seizuresDf, nonSeizureDf = getSeizureNonSeizureDfs(df)
+    if len(nonSeizureDf) == 0:
+        return df
+
+    if 'eventId' in nonSeizureDf.columns:
+        nonSeizureDf = nonSeizureDf.copy()
+        nonSeizureDf['eventId'] = nonSeizureDf['eventId'].astype(str)
+    else:
+        print("noiseAugNonSeizure(): ERROR: eventId column missing.")
+        return df
+
+    try:
+        default_factor = int(float(str(noiseAugFac).strip())) if noiseAugFac is not None else 0
+    except Exception:
+        default_factor = 0
+    try:
+        default_value = float(str(noiseAugVal).strip()) if noiseAugVal is not None else 0.0
+    except Exception:
+        default_value = 0.0
+
+    selector_pairs = _normalise_type_subtype_pairs(targetTypeSubTypePairs)
+    if len(selector_pairs) == 0:
+        if debug:
+            print("noiseAugNonSeizure(): No selector pairs provided; skipping non-seizure augmentation.")
+        return df
+    # Determine if any possible augmentation could occur (global or per-pair)
+    has_any_positive = (default_factor > 0 and any(p.get('factor') is None for p in selector_pairs)) or any((p.get('factor') is not None and p['factor'] > 0) for p in selector_pairs)
+    # If no pair can produce a positive factor, we still skip unless debug wants detail
+    if not has_any_positive and default_factor <= 0:
+        # No effective augmentation possible; return early only if debug false to avoid overhead
+        # Still allow per-pair factor 0 explicit suppression case – handled per event below
+        if not any(p.get('factor') is not None and p['factor'] > 0 for p in selector_pairs):
+            if debug:
+                print("noiseAugNonSeizure(): No positive factor found (global and per-pair); skipping.")
+            # If global factor <=0 and no per-pair positive, nothing will be augmented
+            if default_factor <= 0:
+                # But we must check if any pair relies on fallback (factor None) – then effective is global (0) -> also no-op
+                return df
+
+    accStartCol = nonSeizureDf.columns.get_loc('M001')-1
+    accEndCol = nonSeizureDf.columns.get_loc('M124')+1
+    eventIdCol = nonSeizureDf.columns.get_loc('eventId')
+
+    has3DColumns = 'X000' in nonSeizureDf.columns and 'Y000' in nonSeizureDf.columns and 'Z000' in nonSeizureDf.columns
+    accXStartCol = accXEndCol = accYStartCol = accYEndCol = accZStartCol = accZEndCol = None
+    if has3DColumns:
+        accXStartCol = nonSeizureDf.columns.get_loc('X000')
+        accXEndCol = nonSeizureDf.columns.get_loc('X124') + 1
+        accYStartCol = nonSeizureDf.columns.get_loc('Y000')
+        accYEndCol = nonSeizureDf.columns.get_loc('Y124') + 1
+        accZStartCol = nonSeizureDf.columns.get_loc('Z000')
+        accZEndCol = nonSeizureDf.columns.get_loc('Z124') + 1
+
+    subtype_col = None
+    if 'subType' in nonSeizureDf.columns:
+        subtype_col = 'subType'
+    elif 'subtype' in nonSeizureDf.columns:
+        subtype_col = 'subtype'
+
+    event_ids, event_groups = _build_event_index(nonSeizureDf, id_col='eventId')
+    # --- Console output: echo pairs and effective factor/value ---
+    n_non_events_before = len(event_ids)
+    n_non_dp_before = len(nonSeizureDf)
+    n_seiz_events = len(_build_event_index(seizuresDf, id_col='eventId')[0]) if 'eventId' in seizuresDf.columns and len(seizuresDf) > 0 else 0
+    print(f"noiseAugNonSeizure(): Starting with {n_non_events_before} non-seizure events ({n_non_dp_before} datapoints), {n_seiz_events} seizure events")
+    print(f"noiseAugNonSeizure(): Global factor={default_factor}, value={default_value}; selector pairs ({len(selector_pairs)}):")
+    for p in selector_pairs:
+        eff_f = p['factor'] if p['factor'] is not None else default_factor
+        eff_v = p['value'] if p['value'] is not None else default_value
+        # Count how many events match this pair (for user feedback)
+        cnt = sum(1 for eid in event_ids if _matches_type_subtype_pair(
+            event_groups[eid].iloc[0]['type'] if 'type' in event_groups[eid].columns else None,
+            _extract_subtype_from_row(event_groups[eid].iloc[0], subtype_col),
+            p))
+        type_str = p['type'] if p['type'] is not None else '*'
+        sub_str = p['subType'] if p['subType'] is not None else '*'
+        print(f"  - type='{type_str}', subType='{sub_str}' -> factor={eff_f}, value={eff_v}  [matched {cnt} event(s)]")
+    print(f"noiseAugNonSeizure(): Suffix for augmented events: '-nns{{dup}}'  (e.g. '-nns1', '-nns2')")
+    out_groups = []
+
+    for eid in event_ids:
+        grp = event_groups[eid]
+        out_groups.append(grp.copy())
+
+        first_row = grp.iloc[0]
+        event_type = first_row['type'] if 'type' in grp.columns else None
+        event_subtype = _extract_subtype_from_row(first_row, subtype_col)
+
+        matching_pairs = [p for p in selector_pairs if _matches_type_subtype_pair(event_type, event_subtype, p)]
+        if not matching_pairs:
+            continue
+
+        eff_factor, eff_value = _resolve_non_seizure_aug_params(matching_pairs, default_factor, default_value)
+        if eff_factor <= 0:
+            if debug:
+                print(f"noiseAugNonSeizure(): Skipping {eid} ({event_subtype}) eff_factor={eff_factor} (suppressed).")
+            continue
+
+        use3D_event = False
+        if has3DColumns:
+            # stack() drops NaN so missing samples never count as data.
+            accX_vals = pd.to_numeric(grp.iloc[:, accXStartCol:accXEndCol].stack(), errors='coerce')
+            accY_vals = pd.to_numeric(grp.iloc[:, accYStartCol:accYEndCol].stack(), errors='coerce')
+            accZ_vals = pd.to_numeric(grp.iloc[:, accZStartCol:accZEndCol].stack(), errors='coerce')
+            use3D_event = (accX_vals.abs().max() > 0 or accY_vals.abs().max() > 0 or accZ_vals.abs().max() > 0)
+
+        for dup in range(1, eff_factor + 1):
+            aug_rows = []
+            for _, row in grp.iterrows():
+                outRow = []
+                for i in range(0, accStartCol):
+                    if i == eventIdCol:
+                        outRow.append(f"{eid}-nns{dup}")
+                    else:
+                        outRow.append(row.iloc[i])
+
+                if use3D_event:
+                    # Missing samples stay missing (NaN propagates); never zero-filled.
+                    xArr = pd.to_numeric(row.iloc[accXStartCol:accXEndCol], errors='coerce').to_numpy(dtype=np.float64)
+                    yArr = pd.to_numeric(row.iloc[accYStartCol:accYEndCol], errors='coerce').to_numpy(dtype=np.float64)
+                    zArr = pd.to_numeric(row.iloc[accZStartCol:accZEndCol], errors='coerce').to_numpy(dtype=np.float64)
+
+                    noiseX = np.random.normal(0, eff_value, xArr.shape)
+                    noiseY = np.random.normal(0, eff_value, yArr.shape)
+                    noiseZ = np.random.normal(0, eff_value, zArr.shape)
+
+                    xAugmented = xArr + noiseX
+                    yAugmented = yArr + noiseY
+                    zAugmented = zArr + noiseZ
+                    magAugmented = np.sqrt(xAugmented**2.0 + yAugmented**2.0 + zAugmented**2.0)
+
+                    outRow.extend(magAugmented.tolist())
+                    outRow.extend(xAugmented.tolist())
+                    outRow.extend(yAugmented.tolist())
+                    outRow.extend(zAugmented.tolist())
+
+                    for i in range(accZEndCol, len(row)):
+                        outRow.append(row.iloc[i])
+                else:
+                    accArr = row.iloc[accStartCol:accEndCol]
+                    inArr = pd.to_numeric(accArr, errors='coerce').to_numpy(dtype=np.float64)
+                    noiseArr = np.random.normal(0, eff_value, inArr.shape)
+                    outArr = inArr + noiseArr
+                    outRow.extend(outArr.tolist())
+
+                    for i in range(accEndCol, len(row)):
+                        outRow.append(row.iloc[i])
+
+                aug_rows.append(outRow)
+
+            if len(aug_rows) > 0:
+                out_groups.append(pd.DataFrame(aug_rows, columns=nonSeizureDf.columns))
+
+    nonSeizureAugDf = pd.concat(out_groups, ignore_index=True)
+    df = pd.concat([seizuresDf, nonSeizureAugDf], ignore_index=True)
+    # --- Console output: summary before/after ---
+    n_non_events_after = len(_build_event_index(nonSeizureAugDf, id_col='eventId')[0]) if len(nonSeizureAugDf) > 0 else 0
+    n_non_dp_after = len(nonSeizureAugDf)
+    n_added_events = n_non_events_after - n_non_events_before
+    n_added_dp = n_non_dp_after - n_non_dp_before
+    print(f"noiseAugNonSeizure(): Completed – non-seizure events before: {n_non_events_before}, after: {n_non_events_after} (added {n_added_events} events, {n_added_dp} datapoints)")
+    print(f"noiseAugNonSeizure(): Augmented eventId suffix: '-nns{{dup}}'  e.g. '123-nns1'")
+    return df
+
+def phaseAug(df, phase_step=1, debug=False):
+    ''' Implement phase augmentation of seizure events in dataframe df
+     It expects df to be a pandas dataframe representation of a flattened osdb dataset.
+    For each input event, concatenate its samples in time order and generate multiple synthetic events.
+    Each synthetic event is created by sliding a 125-sample window across the concatenated signal,
+    starting from a different phase offset (step_position), and collecting all non-overlapping windows.
+    Each synthetic event contains multiple rows (one per window from that phase offset).
+    '''
+    seizuresDf, nonSeizureDf = getSeizureNonSeizureDfs(df)
+    if 'eventId' in seizuresDf.columns:
+        seizuresDf = seizuresDf.copy()
+        seizuresDf['eventId'] = seizuresDf['eventId'].astype(str)
+    else:
+        print("phaseAug(): ERROR: eventId column missing.")
+        exit(-1)
+
+    accStartCol = seizuresDf.columns.get_loc('M001')-1
+    accEndCol = seizuresDf.columns.get_loc('M124')+1
+    eventIdCol = seizuresDf.columns.get_loc('eventId')
+    
+    # Check if 3D acceleration columns exist
+    has3DColumns = 'X000' in seizuresDf.columns and 'Y000' in seizuresDf.columns and 'Z000' in seizuresDf.columns
+    accXStartCol, accXEndCol, accYStartCol, accYEndCol, accZStartCol, accZEndCol = None, None, None, None, None, None
+    if has3DColumns:
+        accXStartCol = seizuresDf.columns.get_loc('X000')
+        accXEndCol = seizuresDf.columns.get_loc('X124') + 1
+        accYStartCol = seizuresDf.columns.get_loc('Y000')
+        accYEndCol = seizuresDf.columns.get_loc('Y124') + 1
+        accZStartCol = seizuresDf.columns.get_loc('Z000')
+        accZEndCol = seizuresDf.columns.get_loc('Z124') + 1
+        print("phaseAug(): 3D acceleration columns detected - will apply phase augmentation to all channels")
+    else:
+        print("phaseAug(): No 3D acceleration columns detected - will apply phase augmentation to magnitude only")
+
+    event_ids, event_groups = _build_event_index(seizuresDf, id_col='eventId')
+
+    if len(event_ids) == 0:
+        print("phaseAug(): ERROR:  No seizure events found; returning original dataframe")
+        exit(-1)
+
+    datetime_col = None
+    for cand in ['dataTime', 'datetime', 'timestamp', 'time']:
+        if cand in seizuresDf.columns:
+            datetime_col = cand
+            break
+    if datetime_col is not None:
+        print(f"phaseAug(): Using datetime column '{datetime_col}' for event ordering and spacing checks")
+    else:
+        print("phaseAug(): No datetime column found; proceeding without time-ordering or spacing checks")
+
+    # Loop through each event
+    print(f"phaseAug(): Augmenting {len(event_ids)} seizure events with phase step {phase_step}")
+    out_groups = []
+    for eid in event_ids:
+        grp = event_groups[eid]
+        out_groups.append(grp.copy())  # keep original event
+
+        # Validate and sort by datetime if available; ensure at least 4s spacing
+        if datetime_col is not None:
+            grp = grp.copy()
+            # Add a column with parsed datetime, and sort by datetime
+            grp['_dt'] = pd.to_datetime(grp[datetime_col], errors='coerce')
+            grp = grp.sort_values(by='_dt')
+            # check spacing if we have at least two valid timestamps
+            if grp['_dt'].notna().sum() >= 2:
+                diffs = grp['_dt'].diff().dt.total_seconds()
+                # Find rows where spacing from previous row is < 4s (excluding first row which has NaN diff)
+                bad_spacing_mask = (diffs < 4.0) & (diffs.notna())
+                if bad_spacing_mask.any():
+                    num_dropped = bad_spacing_mask.sum()
+                    print(f"phaseAug(): Dropping {num_dropped} row(s) from event {eid} due to overlapping data.")
+                    # Keep only rows with adequate spacing (or first row)
+                    grp = grp[~bad_spacing_mask].reset_index(drop=True)
+                    print(f"phaseAug(): After dropping overlapping rows, event {eid} has {len(grp)} rows.")
+            grp = grp.drop(columns=['_dt'])
+
+        print("phaseAug(): Processing event %s with %d rows" % (eid, len(grp)))
+        acc_len = accEndCol - accStartCol
+        step = max(1, int(phase_step))
+
+        # Build concatenated magnitude and (optional) 3D arrays in event order,
+        # dropping missing samples (never zero-filled): the next valid sample
+        # concatenates on, matching the production device.  A joint valid mask
+        # keeps mag/x/y/z sample-aligned for the 3D path.
+        mag_raw = pd.to_numeric(grp.iloc[:, accStartCol:accEndCol].to_numpy().reshape(-1), errors='coerce')
+        use3D_event = False
+        x_concat = y_concat = z_concat = None
+        if has3DColumns:
+            x_raw = pd.to_numeric(grp.iloc[:, accXStartCol:accXEndCol].to_numpy().reshape(-1), errors='coerce')
+            y_raw = pd.to_numeric(grp.iloc[:, accYStartCol:accYEndCol].to_numpy().reshape(-1), errors='coerce')
+            z_raw = pd.to_numeric(grp.iloc[:, accZStartCol:accZEndCol].to_numpy().reshape(-1), errors='coerce')
+            use3D_event = (np.nanmax(np.abs(x_raw), initial=0.0) > 0 or
+                           np.nanmax(np.abs(y_raw), initial=0.0) > 0 or
+                           np.nanmax(np.abs(z_raw), initial=0.0) > 0)
+            if use3D_event:
+                x_concat, y_concat, z_concat, mag_concat = _valid_concat_3d(x_raw, y_raw, z_raw, mag_raw)
+            else:
+                # Magnitude-only event in a 3D-columned file: keep the magnitude
+                # path; xyz slots below are written as missing (NaN), not zeros.
+                mag_concat = _valid_concat_1d(mag_raw)
+        else:
+            mag_concat = _valid_concat_1d(mag_raw)
+
+        print(f"phaseAug(): event {eid}: concatenated magnitude array length={len(mag_concat)}")
+        total_len = len(mag_concat)
+        if total_len < acc_len:
+            continue  # not enough data to form a window
+
+        base_row = grp.iloc[0]
+
+        # Generate synthetic events for each phase offset (step_position = 1*step, 2*step, 3*step, ...)
+        # For each phase offset, slide a window across the signal starting from that offset
+        phase_offset = step
+        synthetic_event_count = 0
+        
+        while phase_offset <= acc_len:
+            # For this phase offset, generate all windows starting from phase_offset
+            aug_rows = []
+            window_start = phase_offset
+            
+            while window_start + acc_len <= total_len:
+                window_end = window_start + acc_len
+                mag_slice = mag_concat[window_start:window_end]
+
+                outRow = []
+                for i in range(0, accStartCol):
+                    if i == eventIdCol:
+                        outRow.append(f"{eid}-phase{synthetic_event_count+1}")
+                    else:
+                        outRow.append(base_row.iloc[i])
+
+                outRow.extend(mag_slice.tolist())
+
+                if use3D_event:
+                    x_slice = x_concat[window_start:window_end]
+                    y_slice = y_concat[window_start:window_end]
+                    z_slice = z_concat[window_start:window_end]
+                    outRow.extend(x_slice.tolist())
+                    outRow.extend(y_slice.tolist())
+                    outRow.extend(z_slice.tolist())
+                elif has3DColumns:
+                    # Magnitude-only event: xyz slots stay missing (NaN),
+                    # never zero-filled.
+                    outRow.extend([np.nan] * acc_len)
+                    outRow.extend([np.nan] * acc_len)
+                    outRow.extend([np.nan] * acc_len)
+
+                endCol = accZEndCol if has3DColumns else accEndCol
+                for i in range(endCol, len(base_row)):
+                    outRow.append(base_row.iloc[i])
+
+                aug_rows.append(outRow)
+                window_start += acc_len  # Move to next non-overlapping window
+
+            # Create one synthetic event from all windows at this phase offset
+            if len(aug_rows) > 0:
+                aug_event = pd.DataFrame(aug_rows, columns=seizuresDf.columns)
+                out_groups.append(aug_event)
+                synthetic_event_count += 1
+            
+            phase_offset += step
+
+        print(f"phaseAug(): Completed event {eid}, generated {synthetic_event_count} synthetic events")
+
+    augDf = pd.concat(out_groups, ignore_index=True)
+    if (debug): print("phaseAug() - augDf=", augDf)
+
+    df = pd.concat([augDf, nonSeizureDf], ignore_index=True)
+    if (debug): print("df=",df)
+    return(df)
+
+
+def augmentSeizureData(configObj, dataDir=".", debug=False):
+    '''
+    Given a pandas dataframe of osdb data,
+    Apply data augmentation to the seizure data and return a new, extended data frame.
+    It uses augmentation functions defined in the  augmentData module.
+
+    The following configuration object values are used:
+      - useNoiseAugmentation:  boolean - if True, noise Augmentation is applied to seizure rows.
+      - noiseAugmentationFactor: int - number of copies of each seizure row to create with random noise applied
+      - noiseAugmentationValue: int - amplitude of random noise to apply with noise augmentation.
+      - usePhaseAugmentation:  boolean - if True, phase augmentation is applied to seizure rows.
+      - useUserAugmentation:  boolean - if True, user augmentation is applied to seizure rows.
+      - dcOffsetAugmentation: boolean - if True, per-event DC-offset (sensor bias)
+        augmentation is applied to ALL rows (seizure and non-seizure).
+      - dcOffsetAugmentationFactor: int - shifted copies created per event.
+      - dcOffsetAugmentationMax: float - max |offset| in mg (uniform band).
+      - oversample: boolean - if not 'None', applies oversampling to balance the seizure and non-seizure rows.
+                        Valid values are 'none', 'random' and 'smote'
+      - undersample: boolean - if not 'None', applies undersampling to balance the seizure and non-seizure rows.
+                        Valid values are 'none' and 'random'
+
+    '''
+    TAG = "augmentData.augmentSeizureData()"
+    trainCsvFname = configObj['dataFileNames']['trainDataFileCsv']
+    trainAugCsvFname = configObj['dataFileNames']['trainAugmentedFileCsv']
+    useNoiseAugmentation = configObj['dataProcessing']['noiseAugmentation']
+    noiseAugmentationFactor = configObj['dataProcessing']['noiseAugmentationFactor']
+    noiseAugmentationValue = configObj['dataProcessing']['noiseAugmentationValue']
+    usePhaseAugmentation = configObj['dataProcessing']['phaseAugmentation']
+    phaseAugmentationStep = configObj['dataProcessing'].get('phaseAugmentationStep', 1)
+    useSampleRateAugmentation = configObj['dataProcessing'].get('sampleRateAugmentation', False)
+    sampleRateAugmentationFactors = configObj['dataProcessing'].get('sampleRateAugmentationFactors', [])
+    useUserAugmentation = configObj['dataProcessing']['userAugmentation']
+    useNonSeizureNoiseAugmentation = configObj['dataProcessing'].get('noiseAugmentationNonSeizure', False)
+    nonSeizureNoiseAugmentationFactor = configObj['dataProcessing'].get('noiseAugmentationNonSeizureFactor', 0)
+    nonSeizureNoiseAugmentationValue = configObj['dataProcessing'].get('noiseAugmentationNonSeizureValue', noiseAugmentationValue)
+    nonSeizureNoiseAugmentationPairs = configObj['dataProcessing'].get('noiseAugmentationNonSeizurePairs', [])
+    useDcOffsetAugmentation = configObj['dataProcessing'].get('dcOffsetAugmentation', False)
+    dcOffsetAugmentationFactor = configObj['dataProcessing'].get('dcOffsetAugmentationFactor', 1)
+    dcOffsetAugmentationMax = configObj['dataProcessing'].get('dcOffsetAugmentationMax', 50.0)
+    oversample = configObj['dataProcessing']['oversample']
+    undersample = configObj['dataProcessing']['undersample']   
+
+    trainCsvFnamePath = os.path.join(dataDir, trainCsvFname)
+    trainAugCsvFnamePath = os.path.join(dataDir, trainAugCsvFname)
+    if (debug): print("%s: trainCsvFnamePath=%s" % (TAG, trainCsvFnamePath))
+    if (debug): print("%s: trainAugCsvFnamePath=%s" % (TAG, trainAugCsvFnamePath))
+    if (trainCsvFname is None):
+        print("%s: No input file specified.  Exiting." % TAG)
+        sys.exit(1)
+
+    print("%s: Loading data from file %s." % (TAG, trainCsvFnamePath))
+    df = loadCsv(trainCsvFnamePath,debug)
+    print("augmentData:  Loaded training data: %d datapoints." % (len(df)))
+    #df.to_csv("before_aug.csv")
+    print("Applying Augmentation....")
+
+    # User augmentation should happen FIRST to balance user groups before other augmentations
+    if useUserAugmentation:
+        print("User Augmentation...")
+        if (debug): print("%s: %d datapoints. Applying User Augmentation to Seizure data" % (TAG, len(df)))
+        augDf = userAug(df, config=configObj)
+        df = augDf
+        #df.to_csv("after_userAug.csv")
+
+    if usePhaseAugmentation:
+        print("Phase Augmentation...")
+        if (debug): print("%s: %d datapoints. Applying Phase Augmentation to Seizure data" % (TAG, len(df)))
+        augDf = phaseAug(df, phase_step=phaseAugmentationStep)
+        df = augDf
+        #df.to_csv("after_phaseAug.csv")
+
+    if useSampleRateAugmentation:
+        print("Sample Rate Augmentation...")
+        if (debug): print("%s: %d datapoints. Applying Sample Rate Augmentation with factors=%s" % (TAG, len(df), sampleRateAugmentationFactors))
+        augDf = sampleRateAug(df, sampleRateAugmentationFactors, debug=False, config=configObj)
+        df = augDf
+
+    if useNoiseAugmentation: 
+        print("Noise Augmentation...")
+        if (debug): print("%s: %d datapoints.  Applying Noise Augmentation - factor=%d, value=%.2f%%" % (TAG, len(df), noiseAugmentationFactor, noiseAugmentationValue))
+        augDf = noiseAug(df, 
+                                    noiseAugmentationValue, 
+                                    noiseAugmentationFactor, 
+                                    debug=False,
+                                    config=configObj)
+        df = augDf
+        #df.to_csv("after_noiseAug.csv")
+
+    if useDcOffsetAugmentation:
+        print("DC-Offset Augmentation...")
+        if (debug): print("%s: %d datapoints. Applying DC-offset Augmentation - factor=%d, max=%.1f mg (both classes)" % (TAG, len(df), dcOffsetAugmentationFactor, dcOffsetAugmentationMax))
+        augDf = dcOffsetAug(df,
+                            dcOffsetAugmentationMax,
+                            dcOffsetAugmentationFactor,
+                            debug=False,
+                            config=configObj)
+        df = augDf
+
+    if useNonSeizureNoiseAugmentation:
+        print("Non-Seizure Noise Augmentation...")
+        if (debug):
+            print("%s: %d datapoints. Applying non-seizure Noise Augmentation - factor=%d, value=%.2f, selectors=%s" % (
+                TAG,
+                len(df),
+                nonSeizureNoiseAugmentationFactor,
+                nonSeizureNoiseAugmentationValue,
+                nonSeizureNoiseAugmentationPairs,
+            ))
+        augDf = noiseAugNonSeizure(
+            df,
+            nonSeizureNoiseAugmentationValue,
+            nonSeizureNoiseAugmentationFactor,
+            targetTypeSubTypePairs=nonSeizureNoiseAugmentationPairs,
+            debug=False,
+            config=configObj,
+        )
+        df = augDf
+
+    #print("After applying augmentation, columns are:",df.columns)
+
+    print("Data Augmentation complete.")
+
+
+    # Oversample Data to balance positive and negative data -- operate on whole events
+    if (oversample is not None and oversample.lower()!="none"):
+        print("Oversampling (event-level)...")
+        # build event index and groups
+        event_ids, event_groups = _build_event_index(df, id_col='eventId')
+        # event-level labels: use the first row's 'type' for each event (consistent with extractor)
+        X_events = []
+        y_events = []
+        for eid in event_ids:
+            grp = event_groups[eid]
+            X_events.append([eid])
+            # take first row 'type' as event label
+            try:
+                ev_type = int(grp.iloc[0]['type'])
+            except Exception:
+                ev_type = int(grp['type'].iloc[0])
+            y_events.append(ev_type)
+
+        if (oversample.lower() == "random"):
+            print("%s: %d events: Using Random Oversampling" % (TAG, len(X_events)))
+            event_oversampler = imblearn.over_sampling.RandomOverSampler(random_state=0)
+        elif (oversample.lower() == "smote"):
+            print("%s: %d events: Using SMOTE Oversampling" % (TAG, len(X_events)))
+            # SMOTE is not meaningful on single-feature event ids; fall back to random
+            event_oversampler = imblearn.over_sampling.RandomOverSampler(random_state=0)
+        else:
+            print("%s: Not Using Oversampling" % TAG)
+            event_oversampler = None
+
+        if event_oversampler is not None:
+            # fit_resample expects array-like X; we'll use event index as X
+            res_X, res_y = event_oversampler.fit_resample(X_events, y_events)
+            # res_X contains event-id placeholders (possibly duplicated)
+            # We will reconstruct df by concatenating the corresponding event groups in order
+            new_rows = []
+            dup_counters = {}
+            for rec in res_X:
+                orig_eid = rec[0]
+                grp = event_groups[orig_eid]
+                # if this is a duplicated event (more occurrences in res_X than in event_ids),
+                # assign a new eventId to avoid identical ids for separate duplicated events
+                dup_counters.setdefault(orig_eid, 0)
+                dup_counters[orig_eid] += 1
+                dup_count = dup_counters[orig_eid]
+                if dup_count == 1:
+                    # first occurrence: keep original eventId
+                    out_grp = grp.copy()
+                else:
+                    # subsequent duplicates: make a copy and assign synthetic eventIds
+                    out_grp = grp.copy()
+                    synthetic_eventId = f"{orig_eid}-{dup_count-1}"
+                    out_grp = out_grp.copy()
+                    out_grp['eventId'] = synthetic_eventId
+                new_rows.append(out_grp)
+
+            # concatenate while preserving the resampled event order
+            if len(new_rows) > 0:
+                df = pd.concat(new_rows, ignore_index=True)
+            else:
+                df = pd.DataFrame(columns=df.columns)
+        #df.to_csv("after_oversample.csv")
+
+
+    # Undersample data to balance positive and negative data
+    if (undersample is not None and undersample.lower() != "none"):
+        print("Under Sampling (event-level)...")
+        # build event index and groups
+        event_ids, event_groups = _build_event_index(df, id_col='eventId')
+        X_events = []
+        y_events = []
+        for eid in event_ids:
+            grp = event_groups[eid]
+            X_events.append([eid])
+            try:
+                ev_type = int(grp.iloc[0]['type'])
+            except Exception:
+                ev_type = int(grp['type'].iloc[0])
+            y_events.append(ev_type)
+
+        if (undersample.lower() == "random"):
+            print("Using Random Event Undersampling")
+            event_undersampler = imblearn.under_sampling.RandomUnderSampler(random_state=0)
+        else:
+            print("%s: Not using undersampling" % TAG)
+            event_undersampler = None
+
+        if event_undersampler is not None:
+            res_X, res_y = event_undersampler.fit_resample(X_events, y_events)
+            new_rows = []
+            # res_X are kept event ids; just concatenate corresponding groups
+            for rec in res_X:
+                orig_eid = rec[0]
+                grp = event_groups[orig_eid]
+                new_rows.append(grp.copy())
+            if len(new_rows) > 0:
+                df = pd.concat(new_rows, ignore_index=True)
+            else:
+                df = pd.DataFrame(columns=df.columns)
+        #df.to_csv("after_underample.csv")
+
+    #print("after undersampling, columns are:",df.columns)
+    
+    # Sort by eventId to group original and synthetic events together
+    if 'eventId' in df.columns:
+        print("Sorting data by eventId to group synthetic events with originals...")
+        df['eventId'] = df['eventId'].astype(str)
+        df = df.sort_values(by='eventId', kind='stable').reset_index(drop=True)
+                
+    print("Saving augmented data file to %s" % trainAugCsvFnamePath)
+    df.to_csv(trainAugCsvFnamePath, index=False)
+    print("%s: saved %d datapoints to file %s" % (TAG, len(df), trainAugCsvFnamePath))
+
+    return
+
+
+def balanceTestData(configObj, debug=False):
+    '''
+    Produce a balanced test data file using random over or undersampling as specified
+    in the config file.
+
+    The following configuration object values are used:
+      - oversample: boolean - if not 'None', applies oversampling to balance the seizure and non-seizure rows.
+                        Valid values are 'none', 'random' and 'smote'
+      - undersample: boolean - if not 'None', applies undersampling to balance the seizure and non-seizure rows.
+                        Valid values are 'none' and 'random'
+    '''
+    TAG = "augmentData.balanceTestData()"
+    testCsvFname = configObj['testDataFileCsv']
+    testBalCsvFname = configObj['testBalancedFileCsv']
+    oversample = libosd.configUtils.getConfigParam("oversample", configObj)
+    undersample = libosd.configUtils.getConfigParam("undersample", configObj)
+
+    print("%s: Loading data from file %s." % (TAG, testCsvFname))
+    df = loadCsv(testCsvFname,debug)
+    # Oversample Data at event-level to balance positive and negative data
+    if (oversample is not None and oversample.lower()!="none"):
+        print("Oversampling (event-level)...")
+        event_ids, event_groups = _build_event_index(df, id_col='eventId')
+        X_events = []
+        y_events = []
+        for eid in event_ids:
+            grp = event_groups[eid]
+            X_events.append([eid])
+            try:
+                ev_type = int(grp.iloc[0]['type'])
+            except Exception:
+                ev_type = int(grp['type'].iloc[0])
+            y_events.append(ev_type)
+
+        if (oversample.lower() == "random"):
+            print("%s: %d events: Using Random Oversampling" % (TAG, len(X_events)))
+            event_oversampler = imblearn.over_sampling.RandomOverSampler(random_state=0)
+        elif (oversample.lower() == "smote"):
+            print("%s: %d events: Using SMOTE Oversampling" % (TAG, len(X_events)))
+            event_oversampler = imblearn.over_sampling.RandomOverSampler(random_state=0)
+        else:
+            print("%s: Not Using Oversampling" % TAG)
+            event_oversampler = None
+
+        if event_oversampler is not None:
+            res_X, res_y = event_oversampler.fit_resample(X_events, y_events)
+            new_rows = []
+            dup_counters = {}
+            for rec in res_X:
+                orig_eid = rec[0]
+                grp = event_groups[orig_eid]
+                dup_counters.setdefault(orig_eid, 0)
+                dup_counters[orig_eid] += 1
+                dup_count = dup_counters[orig_eid]
+                if dup_count == 1:
+                    out_grp = grp.copy()
+                else:
+                    out_grp = grp.copy()
+                    synthetic_eventId = f"{orig_eid}-{dup_count-1}"
+                    out_grp = out_grp.copy()
+                    out_grp['eventId'] = synthetic_eventId
+                new_rows.append(out_grp)
+            if len(new_rows) > 0:
+                df = pd.concat(new_rows, ignore_index=True)
+            else:
+                df = pd.DataFrame(columns=df.columns)
+    # Undersample data at event-level to balance positive and negative data
+    if (undersample is not None and undersample.lower() != "none"):
+        print("Under Sampling (event-level)...")
+        event_ids, event_groups = _build_event_index(df, id_col='eventId')
+        X_events = []
+        y_events = []
+        for eid in event_ids:
+            grp = event_groups[eid]
+            X_events.append([eid])
+            try:
+                ev_type = int(grp.iloc[0]['type'])
+            except Exception:
+                ev_type = int(grp['type'].iloc[0])
+            y_events.append(ev_type)
+
+        if (undersample.lower() == "random"):
+            print("Using Random Event Undersampling")
+            event_undersampler = imblearn.under_sampling.RandomUnderSampler(random_state=0)
+        else:
+            print("%s: Not using undersampling" % TAG)
+            event_undersampler = None
+
+        if event_undersampler is not None:
+            res_X, res_y = event_undersampler.fit_resample(X_events, y_events)
+            new_rows = []
+            for rec in res_X:
+                orig_eid = rec[0]
+                grp = event_groups[orig_eid]
+                new_rows.append(grp.copy())
+            if len(new_rows) > 0:
+                df = pd.concat(new_rows, ignore_index=True)
+            else:
+                df = pd.DataFrame(columns=df.columns)
+    
+    # Sort by eventId to group original and synthetic events together
+    if 'eventId' in df.columns:
+        print("Sorting test data by eventId to group synthetic events with originals...")
+        df['eventId'] = df['eventId'].astype(str)
+        df = df.sort_values(by='eventId', kind='stable').reset_index(drop=True)
+                
+    print("Saving augmented data file")
+    df.to_csv(testBalCsvFname, index=False)
+    print("%s: saved %d datapoints to file %s" % (TAG, len(df), testBalCsvFname))
+
+    return
+
+
+def tcAugmentation(df, tcAugFac=1, debug=False):
+    ''' Implement tonic-clonic seizure augmentation in dataframe df
+    
+    Duplicates tonic-clonic seizure events to increase their representation in the training data.
+    This is useful when tonic-clonic seizures are underrepresented or when you want to give them
+    higher weight during training.
+    
+    Args:
+        df: Pandas dataframe with seizure data (expects 'type', 'subType', and 'eventId' columns)
+        tcAugFac: Number of duplicates to create for each tonic-clonic seizure event (default=1 means 2x total)
+        debug: Enable debug output
+    
+    Returns:
+        Augmented dataframe with duplicated tonic-clonic seizure events
+    
+    Expected columns:
+        - type: 1 for seizure, 0 for non-seizure
+        - subType: Seizure subtype (e.g., 'Tonic-Clonic', 'tonic-clonic', 'Focal', etc.)
+        - eventId: Event identifier
+    '''
+    tStart = time.time()
+    TAG = "augmentData.tcAugmentation()"
+    
+    seizuresDf, nonSeizureDf = getSeizureNonSeizureDfs(df)
+    if len(seizuresDf) == 0:
+        print(f"{TAG}: No seizure events found - returning original dataframe")
+        return df
+    
+    if 'subType' not in seizuresDf.columns:
+        print(f"{TAG}: WARNING - 'subType' column not found in dataframe")
+        print(f"{TAG}: Available columns: {list(seizuresDf.columns[:20])}")
+        print(f"{TAG}: Cannot perform tonic-clonic augmentation without subType column")
+        return df
+    
+    if 'eventId' in seizuresDf.columns:
+        seizuresDf = seizuresDf.copy()
+        seizuresDf['eventId'] = seizuresDf['eventId'].astype(str)
+    else:
+        print(f"{TAG}: ERROR: eventId column missing - cannot group by eventId")
+        return df
+    
+    if debug:
+        print(f"{TAG}: Total seizure events: {len(seizuresDf)}")
+        print(f"{TAG}: Unique subtypes: {seizuresDf['subType'].unique()}")
+    
+    # Build event index
+    event_ids, event_groups = _build_event_index(seizuresDf, id_col='eventId')
+    
+    # Identify tonic-clonic events (case-insensitive matching)
+    tc_event_ids = []
+    other_seizure_event_ids = []
+    
+    for eid in event_ids:
+        grp = event_groups[eid]
+        subtype = grp.iloc[0]['subType']
+        
+        # Match various representations of tonic-clonic
+        if subtype is not None and isinstance(subtype, str):
+            subtype_lower = subtype.lower().strip()
+            if 'tonic' in subtype_lower and 'clonic' in subtype_lower:
+                tc_event_ids.append(eid)
+            else:
+                other_seizure_event_ids.append(eid)
+        else:
+            other_seizure_event_ids.append(eid)
+    
+    print(f"{TAG}: Found {len(tc_event_ids)} tonic-clonic events out of {len(event_ids)} total seizure events")
+    
+    # Start with all original data
+    out_groups = []
+    
+    # Add all original seizure events
+    for eid in event_ids:
+        out_groups.append(event_groups[eid].copy())
+    
+    # Add duplicates of tonic-clonic events
+    if len(tc_event_ids) > 0:
+        print(f"{TAG}: Creating {tcAugFac} duplicate(s) for each tonic-clonic event")
+        for eid in tc_event_ids:
+            for dup in range(1, tcAugFac + 1):
+                grp = event_groups[eid]
+                aug_grp = grp.copy()
+                # Create new eventId with suffix
+                synthetic_id = f"{eid}-tc{dup}"
+                aug_grp['eventId'] = synthetic_id
+                out_groups.append(aug_grp)
+    else:
+        print(f"{TAG}: No tonic-clonic events found to augment")
+    
+    # Combine augmented seizures with non-seizure data
+    xResamp = pd.concat(out_groups, ignore_index=True)
+    resultDf = pd.concat([nonSeizureDf, xResamp], ignore_index=True)
+    
+    print(f"{TAG}: Augmentation complete")
+    print(f"{TAG}: Original dataframe: {len(df)} rows")
+    print(f"{TAG}: Augmented dataframe: {len(resultDf)} rows")
+    print(f"{TAG}: Added {len(tc_event_ids) * tcAugFac} tonic-clonic event duplicates")
+    
+    analyseDf(resultDf)
+    
+    tElapsed = time.time() - tStart
+    print(f"{TAG}: Completed in {tElapsed:.1f} seconds")
+    
+    return resultDf
+
+
+
+
+def main():
+    print("flattenOsdb.main()")
+    parser = argparse.ArgumentParser(description='Perform data augmentation on a flattened (.csv) version of the OpenSeizureDatabase data')
+    parser.add_argument('-i', default=None,
+                        help='Input filename (uses stdin if not specified)')
+    parser.add_argument('-o', default='dfAug.csv',
+                        help='Output filename (default dfAug.csv)')
+    parser.add_argument('--debug', action="store_true",
+                        help='Write debugging information to screen')
+    parser.add_argument('-u', action="store_true",
+                        help='Apply User Augmentation')
+    parser.add_argument('-n', action="store_true",
+                        help='Apply Noise Augmentation')
+    parser.add_argument('-p', action="store_true",
+                        help='Apply Phase Augmentation')
+    parser.add_argument('-tc', action="store_true",
+                        help='Apply Tonic-Clonic Augmentation (duplicates tonic-clonic seizure events)')
+    parser.add_argument('--tc-factor', type=int, default=1,
+                        help='Number of duplicates to create for each tonic-clonic event (default=1, creates 2x total)')
+    parser.add_argument('-dc', '--dc-offset', action="store_true",
+                        help='Apply DC-Offset Augmentation (per-event sensor-bias shifts, both classes)')
+    parser.add_argument('--dc-factor', type=int, default=1,
+                        help='Shifted copies to create per event (default=1)')
+    parser.add_argument('--dc-max', type=float, default=50.0,
+                        help='Max |offset| in mg (default=50.0)')
+    argsNamespace = parser.parse_args()
+    args = vars(argsNamespace)
+    print(args)
+
+
+
+    df = loadCsv(args['i'], args['debug'])
+    if (args['u']):
+        df = userAug(df)
+        print("userAug returned df")
+        analyseDf(df)
+    if (args['n']):
+        df = noiseAug(df,10,3,args['debug'])
+        print("noiseAug returned df")
+        analyseDf(df)
+    if (args['p']):
+        df = phaseAug(df, phase_step=25, debug=args['debug'])
+        print("phaseAug returned df")
+        analyseDf(df)
+    if (args['tc']):
+        df = tcAugmentation(df, tcAugFac=args['tc_factor'], debug=args['debug'])
+        print("tcAugmentation returned df")
+        analyseDf(df)
+    if (args.get('dc_offset')):
+        df = dcOffsetAug(df, args.get('dc_max', 50.0), args.get('dc_factor', 1),
+                         debug=args['debug'], config=None)
+        print("dcOffsetAug returned df")
+        analyseDf(df)
+
+    print("Saving augmented data file to %s" % args['o'])
+    df.to_csv(args['o'], index=False)
+    print("Saved %d datapoints to file %s" % (len(df), args['o']))
+
+if __name__ == "__main__":
+    main()

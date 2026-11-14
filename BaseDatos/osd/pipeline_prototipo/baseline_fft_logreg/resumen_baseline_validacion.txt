@@ -1,0 +1,78 @@
+BASELINE FFT + REGRESIÓN LOGÍSTICA
+==============================================================================
+
+Este análisis usa únicamente TRAIN y VALIDATION.
+El conjunto TEST permanece sin utilizar.
+
+DATOS
+Train: 604 ventanas, 48 eventos
+Validation: 264 ventanas, 16 eventos
+Características: 19
+
+SELECCIÓN DEL MODELO
+Mejor C: 0.1
+ROC-AUC ventana: 0.638444
+PR-AUC ventana: 0.850421
+
+UMBRAL YOUDEN — VENTANAS
+threshold: 0.384
+tn: 20.0
+fp: 37.0
+fn: 19.0
+tp: 188.0
+sensitivity: 0.9082125603864735
+specificity: 0.3508771929824561
+fpr: 0.6491228070175439
+precision: 0.8355555555555556
+balanced_accuracy: 0.6295448766844648
+f1: 0.8703703703703705
+f2: 0.892687559354226
+youden: 0.2590897533689296
+
+UMBRAL F2 — VENTANAS
+threshold: 0.0
+tn: 0.0
+fp: 57.0
+fn: 0.0
+tp: 207.0
+sensitivity: 1.0
+specificity: 0.0
+fpr: 1.0
+precision: 0.7840909090909091
+balanced_accuracy: 0.5
+f1: 0.8789808917197451
+f2: 0.9478021978021978
+youden: 0.0
+
+EVALUACIÓN POR EVENTO — CUANTIL 70 %
+ROC-AUC evento: 0.578125
+PR-AUC evento: 0.573990
+threshold: 0.488
+tn: 4.0
+fp: 4.0
+fn: 1.0
+tp: 7.0
+sensitivity: 0.875
+specificity: 0.5
+fpr: 0.5
+precision: 0.6363636363636364
+balanced_accuracy: 0.6875
+f1: 0.7368421052631579
+f2: 0.813953488372093
+youden: 0.375
+
+CARACTERÍSTICAS CON MAYOR PESO ABSOLUTO
+             feature  coefficient  absolute_coefficient
+           power_1_3    -0.446248              0.446248
+           ratio_3_8     0.388185              0.388185
+    spectral_entropy     0.367800              0.367800
+  mean_abs_dynamic_g     0.274322              0.274322
+        power_8_12_5     0.237265              0.237265
+        jerk_rms_g_s     0.232512              0.232512
+              mean_g    -0.224176              0.224176
+autocorr_peak_0_2_2s     0.198802              0.198802
+          ratio_5_10     0.193070              0.193070
+         power_0_2_1     0.156045              0.156045
+
+INTERPRETACIÓN
+Existe señal débil. Conviene ampliar datos y ajustar características antes de evaluar test.

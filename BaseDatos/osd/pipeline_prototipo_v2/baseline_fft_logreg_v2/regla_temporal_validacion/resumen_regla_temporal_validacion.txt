@@ -1,0 +1,94 @@
+OPTIMIZACIÓN DE REGLA TEMPORAL — VALIDACIÓN V2
+==============================================================================
+
+Este análisis NO utiliza el conjunto TEST.
+
+Entrada: C:\Users\cesar\osd\pipeline_prototipo_v2\baseline_fft_logreg_v2\probabilidades_validation.csv
+Eventos: 48
+Ventanas de 5 s: 671
+Objetivo mínimo de sensibilidad: 0.80
+
+MEJOR REGLA SEGÚN YOUDEN
+threshold: 0.518
+required_consecutive: 2.0
+tn: 15.0
+fp: 9.0
+fn: 3.0
+tp: 21.0
+sensitivity: 0.875
+specificity: 0.625
+fpr: 0.375
+precision: 0.7
+balanced_accuracy: 0.75
+f1: 0.7777777777777777
+f2: 0.8333333333333334
+youden: 0.5
+predicted_positive_events: 30.0
+predicted_negative_events: 18.0
+median_alarm_time_s_detected_positives: 20.0
+mean_alarm_time_s_detected_positives: 30.476190476190474
+
+MEJOR REGLA CON SENSIBILIDAD OBJETIVO
+threshold: 0.5191290294610353
+required_consecutive: 2.0
+tn: 15.0
+fp: 9.0
+fn: 3.0
+tp: 21.0
+sensitivity: 0.875
+specificity: 0.625
+fpr: 0.375
+precision: 0.7
+balanced_accuracy: 0.75
+f1: 0.7777777777777777
+f2: 0.8333333333333334
+youden: 0.5
+predicted_positive_events: 30.0
+predicted_negative_events: 18.0
+median_alarm_time_s_detected_positives: 20.0
+mean_alarm_time_s_detected_positives: 30.476190476190474
+
+MEJOR REGLA k=3 SEGÚN YOUDEN
+(k=3 corresponde a tres ventanas consecutivas de 5 s)
+threshold: 0.5286504708312518
+required_consecutive: 3.0
+tn: 21.0
+fp: 3.0
+fn: 11.0
+tp: 13.0
+sensitivity: 0.5416666666666666
+specificity: 0.875
+fpr: 0.125
+precision: 0.8125
+balanced_accuracy: 0.7083333333333333
+f1: 0.65
+f2: 0.5803571428571428
+youden: 0.4166666666666665
+predicted_positive_events: 16.0
+predicted_negative_events: 32.0
+median_alarm_time_s_detected_positives: 55.0
+mean_alarm_time_s_detected_positives: 74.61538461538461
+
+REGLA CANDIDATA SELECCIONADA
+threshold: 0.5191290294610353
+required_consecutive: 2.0
+tn: 15.0
+fp: 9.0
+fn: 3.0
+tp: 21.0
+sensitivity: 0.875
+specificity: 0.625
+fpr: 0.375
+precision: 0.7
+balanced_accuracy: 0.75
+f1: 0.7777777777777777
+f2: 0.8333333333333334
+youden: 0.5
+predicted_positive_events: 30.0
+predicted_negative_events: 18.0
+median_alarm_time_s_detected_positives: 20.0
+mean_alarm_time_s_detected_positives: 30.476190476190474
+
+INTERPRETACIÓN
+El tiempo de alarma se mide desde la primera ventana conservada del evento, no necesariamente desde el inicio clínico exacto de la crisis.
+La regla todavía es candidata: debe fijarse antes de abrir TEST.

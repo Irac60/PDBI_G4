@@ -1,0 +1,188 @@
+{
+	"dbDir": "/home/graham/osd/osdb",
+    "dataFiles": [
+		"testData.json"
+	],
+
+	"eventFilters": {
+		"includeUserIds" : [], 
+		"excludeUserIds" : [],
+		"includeTypes" : [],
+		"excludeTypes" : [],
+		"includeSubTypes" : [],
+		"excludeSubTypes" : [],
+		"includeDataSources" : [],
+		"excludeDataSources" : ["Phone", "AndroidWear"],
+		"includeText" : [],
+		"excludeText" : [],
+		"requireHrData" : false,
+		"requireO2SatData" : false,
+		"require3dData" : false
+		},
+
+    "_dataFiles": [
+		"osdb_3min_allSeizures.json",
+		"osdb_3min_falseAlarms.json",
+    	"osdb_3min_ndaEvents.json",
+		"testData_05may23.json",
+		"osdb_3min_ndaEvents.json",
+		"osdb_3min_falseAlarms.json",
+		"osdb_3min_ndaEvents.json",
+		"osdb_3min_falseAlarms.json"
+	],
+	"download": false,
+    "credentialsFname": "../client.cfg",
+
+    "algorithms": [
+		{
+			"name": "OSD_flap",
+			"alg": "osdAlg.OsdAlg",
+			"enabled": true,
+			"settings" : {
+				"mode": "V2",
+				"offset": 0.0,
+				"sampleFreq" : 25,
+				"samplePeriod" : 5.0,
+				"alarmFreqMin" : 3,
+				"alarmFreqMax" : 8,
+				"alarmThresh" : 500,
+				"alarmRatioThresh" : 57,
+				"warnTime": 5,
+				"alarmTime": 10,
+				"flapSettings": {
+					"enabled": true,
+					"flapAlarmFreqMin" : 2,
+					"flapAlarmFreqMax" : 4,
+					"flapAlarmThresh" : 10000,
+					"flapAlarmRatioThresh" : 80
+				}
+			}
+		},
+		{
+			"name": "OSD_no_flap",
+			"alg": "osdAlg.OsdAlg",
+			"enabled": true,
+			"settings" : {
+				"mode": "V2",
+				"offset": 0.0,
+				"sampleFreq" : 25,
+				"samplePeriod" : 5.0,
+				"alarmFreqMin" : 3,
+				"alarmFreqMax" : 8,
+				"alarmThresh" : 500,
+				"alarmRatioThresh" : 57,
+				"warnTime": 5,
+				"alarmTime": 10,
+				"flapSettings": {
+					"enabled": false,
+					"flapAlarmFreqMin" : 2,
+					"flapAlarmFreqMax" : 4,
+					"flapAlarmThresh" : 10000,
+					"flapAlarmRatioThresh" : 80
+				}
+			}
+		},
+		{
+			"name": "flap",
+			"alg": "osdAlg.OsdAlg",
+			"enabled": false,
+			"settings" : {
+				"mode": "V2",
+				"offset": 0.0,
+				"sampleFreq" : 25,
+				"samplePeriod" : 5.0,
+				"alarmFreqMin" : 2,
+				"alarmFreqMax" : 4,
+				"alarmThresh" : 10000,
+				"alarmRatioThresh" : 80,
+				"warnTime": 5,
+				"alarmTime": 10
+			}
+		},
+		{
+			"name": "HR_Simple",
+			"alg": "hrAlg.HrAlg",
+			"enabled": false,
+			"settings" : {
+				"mode": "MODE_SIMPLE",
+				"thresh_high": 120,
+				"thresh_low": 30,
+				"thresh_offset_high": 30,
+				"thresh_offset_low": 30,
+				"moving_average_time_window": 60,
+				"samplePeriod" : 5.0,
+				"warnTime": 5,
+				"alarmTime": 10
+	
+			}
+		},
+
+
+		{
+			"name": "cnn",
+			"alg": "nnAlg.NnAlg",
+			"enabled": false,
+			"settings" : {
+				"modelFname":"cnn.keras",
+				"inputFormat":1,
+				"normalise": true,
+				"sdThresh": 2.0,
+				"mode": "multi",
+				"samplePeriod" : 5.0,
+				"warnTime": 5,
+				"alarmTime": 10
+			}
+		},
+		{
+			"name": "SpecCnn",
+			"alg": "specAlg.SpecAlg",
+			"enabled": true,
+			"settings" : {
+				"modelFname":"specCnn.keras",
+				"inputFormat":1,
+				"dims": 2,
+				"analysisSamp": 250, 
+				"specSamp": 50, 	
+				"specStep":5,		
+				"normalise": false,
+				"sdThresh": 5.0,
+				"mode": "multi",
+				"samplePeriod" : 5.0,
+				"warnTime": 5,
+				"alarmTime": 10
+			}
+		},
+		{
+			"name": "amber",
+			"alg": "nnAlg.NnAlg",
+			"enabled": true,
+			"settings" : {
+				"modelFname":"AMBER_Model.keras",
+				"inputFormat":1,
+				"mode": "multi",
+				"samplePeriod" : 5.0,
+				"warnTime": 5,
+				"alarmTime": 10
+			}
+		},
+		{
+			"name": "Phone",
+			"alg": "deviceAlg.DeviceAlg",
+			"enabled": false,
+			"settings" : {
+				"ipAddr" : "192.168.0.100"
+			}
+		}
+	],
+	"invalidEvents": [
+		44314, 61879, 61950, 45209, 
+		9828,12763, 12973, 14101, 15208,
+	    21603, 21695, 21797, 21855, 21865, 21866, 21867, 21886, 27786, 45564,
+	88381],
+	"invalidEventsReasons": [
+		"44314, 61879, 61950 - invalid data",
+		"45209 - duplicate of 45208",
+		"9828, 21763, 12973, 14101, 15208 - phone data source - odd 3d data",
+		"21603, 21695, 21797, 21855, 21865, 21866, 21867, 21886, 27786, 45564 - phone data source - odd 3d data"
+	]	
+}

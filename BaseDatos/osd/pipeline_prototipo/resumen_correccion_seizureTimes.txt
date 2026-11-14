@@ -1,0 +1,14 @@
+NORMALIZACIÓN seizureTimes
+========================================================================
+Archivo: C:\Users\cesar\osd\pipeline_prototipo\allData.json
+Respaldo: C:\Users\cesar\osd\pipeline_prototipo\allData_antes_corregir_seizureTimes.json
+
+events_total: 80
+already_numeric: 40
+parsed_string: 0
+parsed_regex: 0
+missing: 40
+invalid: 0
+changed: 0
+
+Los valores missing/invalid quedan como null; flattenData aplicará su intervalo predeterminado.

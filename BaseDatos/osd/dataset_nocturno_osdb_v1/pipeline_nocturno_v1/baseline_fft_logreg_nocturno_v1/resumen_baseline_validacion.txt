@@ -1,0 +1,87 @@
+BASELINE FFT + REGRESIÓN LOGÍSTICA — NOCTURNO V1
+==============================================================================
+
+Este análisis usa únicamente TRAIN y VALIDATION.
+El conjunto TEST permanece sin utilizar.
+
+DATOS
+Train: 286 ventanas, 21 eventos
+Validation: 63 ventanas, 7 eventos
+Características: 19
+
+SELECCIÓN DEL MODELO
+Mejor C: 0.1
+ROC-AUC ventana: 0.620408
+PR-AUC ventana: 0.674499
+
+UMBRAL YOUDEN — VENTANAS
+threshold: 0.419
+tn: 15.0
+fp: 13.0
+fn: 11.0
+tp: 24.0
+sensitivity: 0.6857142857142857
+specificity: 0.5357142857142857
+fpr: 0.4642857142857143
+precision: 0.6486486486486487
+balanced_accuracy: 0.6107142857142858
+f1: 0.6666666666666667
+f2: 0.6779661016949152
+youden: 0.22142857142857153
+
+UMBRAL F2 — VENTANAS
+threshold: 0.333
+tn: 2.0
+fp: 26.0
+fn: 0.0
+tp: 35.0
+sensitivity: 1.0
+specificity: 0.07142857142857142
+fpr: 0.9285714285714286
+precision: 0.5737704918032787
+balanced_accuracy: 0.5357142857142857
+f1: 0.7291666666666666
+f2: 0.8706467661691543
+youden: 0.0714285714285714
+
+EVALUACIÓN POR EVENTO — CUANTIL 70 %
+ROC-AUC evento: 0.583333
+PR-AUC evento: 0.666667
+threshold: 0.491
+tn: 4.0
+fp: 0.0
+fn: 2.0
+tp: 1.0
+sensitivity: 0.3333333333333333
+specificity: 1.0
+fpr: 0.0
+precision: 1.0
+balanced_accuracy: 0.6666666666666666
+f1: 0.5
+f2: 0.3846153846153846
+youden: 0.33333333333333326
+
+CARACTERÍSTICAS CON MAYOR PESO ABSOLUTO
+             feature  coefficient  absolute_coefficient
+      peak_to_peak_g    -0.281460              0.281460
+  mean_abs_dynamic_g     0.264621              0.264621
+   max_abs_dynamic_g    -0.257598              0.257598
+        jerk_rms_g_s     0.251122              0.251122
+          power_5_10     0.202813              0.202813
+           power_3_8     0.180612              0.180612
+           ratio_3_8     0.157860              0.157860
+        power_8_12_5     0.131900              0.131900
+dominant_power_ratio    -0.126920              0.126920
+               std_g     0.124083              0.124083
+
+COMPARACIÓN CON MODELO GENERAL V2
+ROC-AUC ventana general V2: 0.636703
+ROC-AUC evento general V2: 0.680556
+Cambio ROC-AUC ventana nocturno-general: -0.016295
+Cambio ROC-AUC evento nocturno-general: -0.097223
+
+ADVERTENCIA DE TAMAÑO MUESTRAL
+VALIDATION nocturno contiene solo 7 eventos. Las métricas por evento pueden cambiar mucho con 1 solo evento; se interpretan como prueba de concepto, no como estimación clínica.
+
+INTERPRETACIÓN
+Existe señal débil. Conviene ampliar datos y ajustar características antes de evaluar test.

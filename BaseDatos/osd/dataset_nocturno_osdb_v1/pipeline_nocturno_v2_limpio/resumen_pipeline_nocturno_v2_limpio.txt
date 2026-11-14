@@ -1,0 +1,63 @@
+PIPELINE NOCTURNO OSDB V2 — SPLIT LIMPIO
+==============================================================================
+
+REGLA
+Los 5 positivos con nota de incertidumbre se fuerzan exclusivamente a TRAIN.
+VALIDATION y TEST contienen solo crisis Tonic-Clonic nocturnas sin nota de incertidumbre.
+
+EVENTOS DISPONIBLES
+Positivos totales: 17
+Positivos limpios: 12
+Positivos dudosos: 5
+Negativos nocturnos: 18
+
+TRAIN
+Filas: 274
+Eventos: 21
+Positivos: 11
+Negativos: 10
+Filas positivas: 212
+Filas negativas: 62
+Usuarios: 3
+
+VALIDATION
+Filas: 81
+Eventos: 7
+Positivos: 3
+Negativos: 4
+Filas positivas: 54
+Filas negativas: 27
+Usuarios: 3
+
+TEST
+Filas: 135
+Eventos: 7
+Positivos: 3
+Negativos: 4
+Filas positivas: 107
+Filas negativas: 28
+Usuarios: 2
+
+POSITIVOS DUDOSOS
+split  eventId  userId              typeStr  n_rows
+train  1333417    1643 Seizure/Tonic-Clonic      13
+train  1343957    1643 Seizure/Tonic-Clonic      31
+train  1343962    1643 Seizure/Tonic-Clonic       5
+train  1343971    1643 Seizure/Tonic-Clonic      64
+train  1354976    1643 Seizure/Tonic-Clonic      54
+
+VERIFICACIONES
+Positivos dudosos en VALIDATION: 0
+Positivos dudosos en TEST: 0
+Train ∩ Validation eventId: 0
+Train ∩ Test eventId: 0
+Validation ∩ Test eventId: 0
+
+SUPERPOSICIÓN DE USUARIOS
+Train ∩ Validation: 3
+Train ∩ Test: 2
+Validation ∩ Test: 2
+
+SIGUIENTE PASO
+Entrenar el mismo baseline FFT + regresión logística con TRAIN y VALIDATION de esta nueva división.
+TEST permanece cerrado.

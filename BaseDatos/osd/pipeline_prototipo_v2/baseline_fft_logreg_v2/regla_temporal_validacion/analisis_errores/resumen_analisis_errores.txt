@@ -1,0 +1,80 @@
+ANÁLISIS DE ERRORES — REGLA TEMPORAL V2
+==============================================================================
+
+Este análisis usa únicamente VALIDACIÓN.
+TEST permanece sin utilizar.
+
+REGLA ANALIZADA
+Umbral: 0.5191290294610353
+Ventanas consecutivas requeridas: 2
+
+MATRIZ DE CONFUSIÓN POR EVENTO
+TP: 21
+TN: 15
+FP: 9
+FN: 3
+
+FALSOS POSITIVOS
+- eventId=24474 | categoría=nda | subtipo=<VACÍO> | fuente=Garmin | maxP=0.6451 | ventanas+=5/7
+- eventId=1345833 | categoría=nda | subtipo=<VACÍO> | fuente=Garmin | maxP=0.6556 | ventanas+=2/2
+- eventId=151210 | categoría=nda | subtipo=<VACÍO> | fuente=Garmin | maxP=0.5617 | ventanas+=4/7
+- eventId=24678 | categoría=nda | subtipo=<VACÍO> | fuente=Garmin | maxP=0.5998 | ventanas+=2/7
+- eventId=339120 | categoría=false_alarm_hard | subtipo=Walking/Running/Cycling | fuente=BLE2 | maxP=0.6378 | ventanas+=6/8
+- eventId=1351212 | categoría=false_alarm_hard | subtipo=Typing/Hand Tools | fuente=Garmin | maxP=0.6118 | ventanas+=3/7
+- eventId=194140 | categoría=false_alarm_hard | subtipo=Cooking/Washing/Cleaning | fuente=Garmin | maxP=0.6082 | ventanas+=6/7
+- eventId=29445 | categoría=false_alarm_other | subtipo=<VACÍO> | fuente=Garmin | maxP=0.5448 | ventanas+=3/7
+- eventId=101312 | categoría=false_alarm_other | subtipo=Other | fuente=Garmin | maxP=0.6354 | ventanas+=5/8
+
+FALSOS NEGATIVOS
+- eventId=9005 | subtipo=Tonic-Clonic | fuente=Garmin | maxP=0.5532 | ventanas+=1/2
+- eventId=1332192 | subtipo=Tonic-Clonic | fuente=Garmin | maxP=0.5480 | ventanas+=1/13
+- eventId=1333420 | subtipo=Tonic-Clonic | fuente=Garmin | maxP=0.5355 | ventanas+=1/3
+
+FPR POR CATEGORÍA NEGATIVA
+selection_category  negative_events  false_positives  false_positive_rate
+  false_alarm_hard                7                3             0.428571
+ false_alarm_other                5                2             0.400000
+               nda               12                4             0.333333
+
+SUBTIPOS NEGATIVOS CON MÁS FALSOS POSITIVOS
+selection_category                  subtype  negative_events  false_positives  false_positive_rate
+               nda                  <VACÍO>               12                4             0.333333
+  false_alarm_hard  Walking/Running/Cycling                1                1             1.000000
+  false_alarm_hard Cooking/Washing/Cleaning                2                1             0.500000
+ false_alarm_other                    Other                2                1             0.500000
+  false_alarm_hard        Typing/Hand Tools                3                1             0.333333
+ false_alarm_other                  <VACÍO>                3                1             0.333333
+  false_alarm_hard         Sorting/Knitting                1                0             0.000000
+
+CARACTERÍSTICAS QUE MÁS DIFERENCIAN FP DE TN
+              feature   mean_FP  mean_TN  difference  standardized_difference  n_windows_FP  n_windows_TN  absolute_standardized_difference
+               mean_g  1.034508 0.998766    0.035741                 1.017754            60           107                          1.017754
+           ratio_5_10  0.385255 0.279259    0.105996                 0.700192            60           107                          0.700192
+           power_5_10 10.397484 2.446844    7.950640                 0.513101            60           107                          0.513101
+            power_3_8 14.639465 4.326644   10.312821                 0.425582            60           107                          0.425582
+            ratio_3_8  0.409811 0.352939    0.056871                 0.422599            60           107                          0.422599
+         power_8_12_5  3.908925 1.364030    2.544895                 0.419820            60           107                          0.419820
+     spectral_entropy  0.863074 0.828154    0.034920                 0.412907            60           107                          0.412907
+dominant_frequency_hz  4.646667 3.446729    1.199938                 0.374783            60           107                          0.374783
+            power_1_3 21.553653 9.414474   12.139179                 0.278506            60           107                          0.278506
+ dominant_power_ratio  0.099859 0.118064   -0.018205                -0.278271            60           107                          0.278271
+
+CARACTERÍSTICAS QUE MÁS DIFERENCIAN FN DE TP
+             feature  mean_FN  mean_TP  difference  standardized_difference  n_windows_FN  n_windows_TP  absolute_standardized_difference
+              mean_g 0.970034 1.020557   -0.050523                -1.515431            18           486                          1.515431
+        jerk_rms_g_s 0.279152 1.478882   -1.199730                -0.717319            18           486                          0.717319
+      peak_to_peak_g 0.083911 0.356680   -0.272770                -0.701995            18           486                          0.701995
+   max_abs_dynamic_g 0.051355 0.223704   -0.172349                -0.634482            18           486                          0.634482
+               std_g 0.012001 0.052466   -0.040466                -0.625046            18           486                          0.625046
+       rms_dynamic_g 0.012001 0.052466   -0.040466                -0.625046            18           486                          0.625046
+  mean_abs_dynamic_g 0.007188 0.035192   -0.028004                -0.594551            18           486                          0.594551
+dominant_power_ratio 0.079501 0.095984   -0.016484                -0.484323            18           486                          0.484323
+autocorr_peak_0_2_2s 0.175052 0.209677   -0.034625                -0.442493            18           486                          0.442493
+           ratio_3_8 0.436390 0.505561   -0.069171                -0.429282            18           486                          0.429282
+
+INTERPRETACIÓN
+El objetivo es identificar si los falsos positivos se concentran en una actividad concreta o si son heterogéneos. Con ese resultado se decidirá entre:
+- compuerta de intensidad de movimiento;
+- nuevas características de ritmicidad;
+- incorporar rawData3D;
+- conservar dos ventanas como WARNING y exigir otra condición para ALARM.

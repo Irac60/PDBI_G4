@@ -1,0 +1,21 @@
+COMPARACIÓN TEMPORAL k=2 vs k=3 — NOCTURNO
+==============================================================================
+
+Umbrales fijos:
+power_threshold = 0.05425036036486526
+ratio_threshold = 0.436484300104836
+
+No se reoptimizan umbrales.
+TEST permanece cerrado.
+
+RESULTADOS
+     split  k  tn  fp  fn  tp  sensitivity  specificity  fpr  precision  balanced_accuracy  median_alarm_time_s
+     train  2   5   5   3   8     0.727273          0.5  0.5   0.615385           0.613636                 22.5
+     train  3  10   0   3   8     0.727273          1.0  0.0   1.000000           0.863636                 30.0
+validation  2   4   0   0   3     1.000000          1.0  0.0   1.000000           1.000000                 40.0
+validation  3   4   0   1   2     0.666667          1.0  0.0   1.000000           0.833333                 40.0
+
+DECISIÓN ORIENTATIVA
+k=2 domina o iguala a k=3 en VALIDATION.
+Para este prototipo puede usarse k=2 como WARNING de movimiento sospechoso.
+La confirmación final deberá venir después de PPG/EEG o de una condición adicional.

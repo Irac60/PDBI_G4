@@ -1,0 +1,210 @@
+INVENTARIO OPEN SEIZURE DATABASE
+==============================================================================
+Carpeta de datos: C:\Users\cesar\osd\osdb_full_v1.11
+
+ARCHIVOS ENCONTRADOS
+------------------------------------------------------------------------------
+LICENCE.md: 1.43 KB
+osdb_3min_allSeizures.csv: 72.82 KB
+osdb_3min_allSeizures.json: 177.74 MB
+osdb_3min_fallEvents.csv: 3.45 KB
+osdb_3min_fallEvents.json: 7.17 MB
+osdb_3min_falseAlarms.csv: 1.56 MB
+osdb_3min_falseAlarms.json: 3.93 GB
+osdb_3min_ndaEvents.csv: 554.36 KB
+osdb_3min_ndaEvents.json: 1.89 GB
+OSDB_LICENCE.txt: 15.71 KB
+README.md: 1.60 KB
+
+COMPROBACIÓN DE JSON ESPERADOS
+------------------------------------------------------------------------------
+osdb_3min_allSeizures.json: OK
+osdb_3min_falseAlarms.json: OK
+osdb_3min_ndaEvents.json: OK
+osdb_3min_fallEvents.json: OK
+
+==============================================================================
+CSV: osdb_3min_allSeizures.csv
+==============================================================================
+Filas: 522
+Columnas (14): ['id', 'dataTime', 'userId', 'type', 'subType', 'osdAlarmState', 'dataSourceName', 'phoneAppVersion', 'watchSdVersion', 'alarmFreqMin', 'alarmFreqMax', 'alarmThresh', 'alarmRatioThresh', 'desc']
+Eventos únicos según id: 522
+Usuarios únicos según userId: 33
+
+Conteo por type:
+  Seizure: 522
+
+Conteo por subType:
+  Tonic-Clonic: 288
+  Other: 137
+  Aura: 69
+  Suspected: 24
+  <VACÍO>: 4
+
+Conteo por dataSourceName:
+  Garmin: 403
+  BLE2: 81
+  <VACÍO>: 38
+
+==============================================================================
+CSV: osdb_3min_fallEvents.csv
+==============================================================================
+Filas: 36
+Columnas (14): ['id', 'dataTime', 'userId', 'type', 'subType', 'osdAlarmState', 'dataSourceName', 'phoneAppVersion', 'watchSdVersion', 'alarmFreqMin', 'alarmFreqMax', 'alarmThresh', 'alarmRatioThresh', 'desc']
+Eventos únicos según id: 36
+Usuarios únicos según userId: 7
+
+Conteo por type:
+  Fall: 36
+
+Conteo por subType:
+  Uncontrolled: 21
+  <VACÍO>: 15
+
+Conteo por dataSourceName:
+  Garmin: 29
+  <VACÍO>: 7
+
+==============================================================================
+CSV: osdb_3min_falseAlarms.csv
+==============================================================================
+Filas: 12980
+Columnas (14): ['id', 'dataTime', 'userId', 'type', 'subType', 'osdAlarmState', 'dataSourceName', 'phoneAppVersion', 'watchSdVersion', 'alarmFreqMin', 'alarmFreqMax', 'alarmThresh', 'alarmRatioThresh', 'desc']
+Eventos únicos según id: 12980
+Usuarios únicos según userId: 129
+
+Conteo por type:
+  False Alarm: 12980
+
+Conteo por subType:
+  <VACÍO>: 10121
+  Other: 669
+  Unknown: 660
+  Walking/Running/Cycling: 239
+  Other (Please describe in notes): 204
+  Cooking/Washing/Cleaning: 199
+  Typing/Hand Tools: 193
+  Talking/Standing Still: 145
+  Brushing Hair/Teeth: 106
+  Motor Vehicle: 86
+  Typing: 60
+  Sorting: 54
+  Computer Games: 47
+  Sorting/Knitting: 44
+  Washing / cleaning: 32
+  Talking: 31
+  Pushing Pram/Wheelchair/Lawn Mower: 29
+  Brushing Teeth: 18
+  Cycling: 15
+  walking: 9
+  Pushing Pram/Wheelchair: 8
+  Knitting: 4
+  Cycle/Run/Walk: 3
+  Washing Up: 1
+  Aura: 1
+  Brushing Hair: 1
+  CHECK: 1
+
+Conteo por dataSourceName:
+  Garmin: 10557
+  BLE2: 1933
+  <VACÍO>: 355
+  BLE: 115
+  Network: 20
+
+==============================================================================
+CSV: osdb_3min_ndaEvents.csv
+==============================================================================
+Filas: 6172
+Columnas (14): ['id', 'dataTime', 'userId', 'type', 'subType', 'osdAlarmState', 'dataSourceName', 'phoneAppVersion', 'watchSdVersion', 'alarmFreqMin', 'alarmFreqMax', 'alarmThresh', 'alarmRatioThresh', 'desc']
+Eventos únicos según id: 6172
+Usuarios únicos según userId: 27
+
+Conteo por type:
+  nda: 6172
+
+Conteo por subType:
+  <VACÍO>: 6172
+
+Conteo por dataSourceName:
+  Garmin: 4537
+  BLE2: 1582
+  <VACÍO>: 27
+  BLE: 24
+  Network: 2
+
+==============================================================================
+JSON: osdb_3min_allSeizures.json
+==============================================================================
+Claves del evento: ['_merged_datapoint_count', '_merged_event_count', '_merged_from_event_ids', 'adaptiveHrAlarmActive', 'adaptiveHrAlarmStanding', 'adaptiveHrAlarmThresh', 'adaptiveHrAlarmWindow', 'alarmCause', 'alarmFreqMax', 'alarmFreqMin', 'alarmPhrase', 'alarmRatioThresh', 'alarmRationale', 'alarmState', 'alarmThresh', 'alarmTime', 'analysisPeriod', 'averageHrAlarmActive', 'averageHrAlarmStanding', 'averageHrAlarmThreshMax', 'averageHrAlarmThreshMin', 'batteryPc', 'cnnAlarmActive', 'dataJSON', 'dataSourceName', 'dataTime', 'dataTimeEnd', 'datapoints', 'desc', 'duration_seconds', 'faultCause', 'has_local_changes', 'hrAlarmActive', 'hrAlarmStanding', 'hrThreshMax', 'hrThreshMin', 'id', 'last_remote_update', 'local_edits', 'merged_event_count', 'merged_from_events', 'o2SatAlarmActive', 'o2SatAlarmStanding', 'o2SatThreshMin', 'osdAlarmActive', 'osdAlarmState', 'phoneAppVersion', 'phoneBatteryPc', 'remote_hash', 'sampleFreq', 'sdMode', 'seizureTimes', 'subType', 'type', 'userId', 'watchFwVersion', 'watchManuf', 'watchPartNo', 'watchSdName', 'watchSdVersion', 'watchSerNo', 'watchSerialNo', 'watchSignalStrength']
+id: 407
+userId: 39
+type: Seizure
+subType: Other
+sampleFreq: nan
+seizureTimes: [-38.0, 76.0]
+dataSourceName: None
+Número de datapoints en el primer evento: 30
+Claves del primer datapoint: ['alarmState', 'dataTime', 'hr', 'o2Sat', 'rawData', 'roiPower', 'specPower']
+Longitud rawData: 125
+Longitud rawData3D: ausente/no lista
+hr: 67
+o2Sat: -1
+alarmState: 0
+
+==============================================================================
+JSON: osdb_3min_falseAlarms.json
+==============================================================================
+Claves del evento: ['_merged_datapoint_count', '_merged_event_count', '_merged_from_event_ids', 'adaptiveHrAlarmActive', 'adaptiveHrAlarmStanding', 'adaptiveHrAlarmThresh', 'adaptiveHrAlarmWindow', 'alarmCause', 'alarmFreqMax', 'alarmFreqMin', 'alarmPhrase', 'alarmRatioThresh', 'alarmRationale', 'alarmState', 'alarmThresh', 'alarmTime', 'analysisPeriod', 'averageHrAlarmActive', 'averageHrAlarmStanding', 'averageHrAlarmThreshMax', 'averageHrAlarmThreshMin', 'batteryPc', 'cnnAlarmActive', 'dataJSON', 'dataSourceName', 'dataTime', 'dataTimeEnd', 'datapoints', 'desc', 'duration_seconds', 'faultCause', 'has_local_changes', 'hrAlarmActive', 'hrAlarmStanding', 'hrThreshMax', 'hrThreshMin', 'id', 'last_remote_update', 'local_edits', 'merged_event_count', 'merged_from_events', 'o2SatAlarmActive', 'o2SatAlarmStanding', 'o2SatThreshMin', 'osdAlarmActive', 'osdAlarmState', 'phoneAppVersion', 'phoneBatteryPc', 'remote_hash', 'sampleFreq', 'sdMode', 'seizureTimes', 'subType', 'type', 'userId', 'watchFwVersion', 'watchManuf', 'watchPartNo', 'watchSdName', 'watchSdVersion', 'watchSerNo', 'watchSerialNo', 'watchSignalStrength']
+id: 9009
+userId: 98
+type: False Alarm
+subType: Unknown
+sampleFreq: 0.0
+seizureTimes: None
+dataSourceName: Garmin
+Número de datapoints en el primer evento: 1
+Claves del primer datapoint: ['alarmState', 'dataTime', 'hr', 'o2Sat', 'rawData', 'rawData3D', 'roiPower', 'roiRatio', 'specPower']
+Longitud rawData: 125
+Longitud rawData3D: 375
+hr: 0
+o2Sat: 0
+alarmState: 5
+
+==============================================================================
+JSON: osdb_3min_ndaEvents.json
+==============================================================================
+Claves del evento: ['alarmFreqMax', 'alarmFreqMin', 'alarmPhrase', 'alarmRatioThresh', 'alarmRationale', 'alarmThresh', 'alarmTime', 'batteryPc', 'dataSourceName', 'dataTime', 'dataTimeEnd', 'datapoints', 'desc', 'duration_seconds', 'has_local_changes', 'hrThreshMax', 'hrThreshMin', 'id', 'last_remote_update', 'local_edits', 'merged_event_count', 'merged_from_events', 'o2SatAlarmActive', 'o2SatAlarmStanding', 'o2SatThreshMin', 'osdAlarmState', 'phoneAppVersion', 'remote_hash', 'seizureTimes', 'subType', 'type', 'userId', 'watchFwVersion', 'watchPartNo', 'watchSdName', 'watchSdVersion', 'watchSerialNo']
+id: 23336
+userId: 38
+type: nda
+subType: 
+sampleFreq: None
+seizureTimes: None
+dataSourceName: None
+Número de datapoints en el primer evento: 28
+Claves del primer datapoint: ['alarmState', 'dataTime', 'hr', 'o2Sat', 'rawData', 'rawData3D', 'roiPower', 'roiRatio', 'specPower']
+Longitud rawData: 125
+Longitud rawData3D: 375
+hr: 62
+o2Sat: 96
+alarmState: 0
+
+==============================================================================
+JSON: osdb_3min_fallEvents.json
+==============================================================================
+Claves del evento: ['alarmFreqMax', 'alarmFreqMin', 'alarmPhrase', 'alarmRatioThresh', 'alarmRationale', 'alarmState', 'alarmThresh', 'alarmTime', 'analysisPeriod', 'batteryPc', 'dataSourceName', 'dataTime', 'dataTimeEnd', 'datapoints', 'desc', 'duration_seconds', 'has_local_changes', 'hrAlarmActive', 'hrAlarmStanding', 'hrThreshMax', 'hrThreshMin', 'id', 'last_remote_update', 'local_edits', 'merged_event_count', 'merged_from_events', 'o2SatAlarmActive', 'o2SatAlarmStanding', 'o2SatThreshMin', 'osdAlarmState', 'phoneAppVersion', 'remote_hash', 'sampleFreq', 'sdMode', 'seizureTimes', 'subType', 'type', 'userId', 'watchFwVersion', 'watchPartNo', 'watchSdName', 'watchSdVersion', 'watchSerialNo']
+id: 7059
+userId: 53
+type: Fall
+subType: Uncontrolled
+sampleFreq: 0
+seizureTimes: None
+dataSourceName: 
+Número de datapoints en el primer evento: 25
+Claves del primer datapoint: ['alarmState', 'dataTime', 'hr', 'o2Sat', 'rawData', 'rawData3D', 'roiPower', 'roiRatio', 'specPower']
+Longitud rawData: 125
+Longitud rawData3D: 375
+hr: 89
+o2Sat: -1
+alarmState: 0

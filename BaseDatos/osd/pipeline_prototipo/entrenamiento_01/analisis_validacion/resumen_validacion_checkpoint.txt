@@ -1,0 +1,75 @@
+ANÁLISIS DEL CHECKPOINT SOBRE VALIDACIÓN
+==============================================================================
+
+Checkpoint: C:\Users\cesar\osd\pipeline_prototipo\entrenamiento_01\prototipo_osdb_pytorch_smoke.pt
+Vectores evaluados: 264
+Positivos reales: 207
+Negativos reales: 57
+ROC-AUC: 0.481905
+PR-AUC: 0.774053
+Probabilidad mínima global: 0.516311287880
+Probabilidad máxima global: 0.516312062740
+Probabilidad media global: 0.516311705112
+Rango global: 7.748603820801e-07
+
+PROBABILIDADES POR CLASE
+No crisis: min=0.516311585903, max=0.516312062740, media=0.516311735438, DE=1.321636695578e-07
+Crisis: min=0.516311287880, max=0.516311824322, media=0.516311696762, DE=7.649483728551e-08
+
+UMBRAL 0.5
+threshold: 0.5
+tn: 0.0
+fp: 57.0
+fn: 0.0
+tp: 207.0
+accuracy: 0.7840909090909091
+balanced_accuracy: 0.5
+sensitivity: 1.0
+specificity: 0.0
+fpr: 1.0
+precision: 0.7840909090909091
+f1: 0.8789808917197451
+f2: 0.9478021978021978
+youden: 0.0
+predicted_positive: 264.0
+predicted_negative: 0.0
+
+MEJOR UMBRAL SEGÚN YOUDEN
+threshold: 0.5163117051124573
+tn: 22.0
+fp: 35.0
+fn: 48.0
+tp: 159.0
+accuracy: 0.6856060606060606
+balanced_accuracy: 0.5770404271548436
+sensitivity: 0.7681159420289855
+specificity: 0.38596491228070173
+fpr: 0.6140350877192983
+precision: 0.8195876288659794
+f1: 0.7930174563591021
+f2: 0.7778864970645792
+youden: 0.1540808543096872
+predicted_positive: 194.0
+predicted_negative: 70.0
+
+MEJOR UMBRAL SEGÚN F2
+threshold: 0.0
+tn: 0.0
+fp: 57.0
+fn: 0.0
+tp: 207.0
+accuracy: 0.7840909090909091
+balanced_accuracy: 0.5
+sensitivity: 1.0
+specificity: 0.0
+fpr: 1.0
+precision: 0.7840909090909091
+f1: 0.8789808917197451
+f2: 0.9478021978021978
+youden: 0.0
+predicted_positive: 264.0
+predicted_negative: 0.0
+
+INTERPRETACIÓN AUTOMÁTICA
+El ranking es cercano al azar; ajustar el umbral no basta.
+Conviene aumentar datos y reentrenar antes de usar test.

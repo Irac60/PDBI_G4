@@ -1,0 +1,58 @@
+PIPELINE OSDB V2 PREPARADO
+==============================================================================
+
+Configuración: C:\Users\cesar\osd\OpenSeizureDatabase\nnConfig_prototipo_v2.json
+Subconjunto: C:\Users\cesar\osd\osdb_subset_v2
+Pipeline: C:\Users\cesar\osd\pipeline_prototipo_v2
+
+APLANADO
+Filas totales: 3024
+Eventos totales: 239
+Eventos positivos: 119
+Eventos negativos: 120
+Filas positivas: 2184
+Filas negativas: 840
+
+DIVISIÓN
+
+TRAIN
+Filas: 1780
+Eventos: 143
+Eventos positivos: 71
+Eventos negativos: 72
+Filas positivas: 1275
+Filas negativas: 505
+Usuarios: 27
+
+VALIDATION
+Filas: 671
+Eventos: 48
+Eventos positivos: 24
+Eventos negativos: 24
+Filas positivas: 504
+Filas negativas: 167
+Usuarios: 13
+
+TEST
+Filas: 573
+Eventos: 48
+Eventos positivos: 24
+Eventos negativos: 24
+Filas positivas: 405
+Filas negativas: 168
+Usuarios: 17
+
+FUGA DE eventId
+Train ∩ Validation: 0
+Train ∩ Test: 0
+Validation ∩ Test: 0
+
+SUPERPOSICIÓN DE userId (informativa)
+Train ∩ Validation: 10
+Train ∩ Test: 14
+Validation ∩ Test: 9
+
+VEREDICTO
+Fuga de eventId: NO
+Eventos recuperados: 239/239
+TEST permanece reservado.

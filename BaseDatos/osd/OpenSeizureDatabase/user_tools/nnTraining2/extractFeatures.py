@@ -1,0 +1,880 @@
+
+import pandas as pd
+import numpy as np
+import scipy.signal
+import libosd.osdAlgTools
+try:
+    from user_tools.nnTraining2 import accelFeatures
+    from user_tools.nnTraining2 import io_utils
+except ImportError:
+    import accelFeatures
+    import io_utils
+
+
+def sort_event_by_time(event_df):
+    """Return the event's rows in chronological dataTime order.
+
+    dataTime values in flattened CSVs mix formats - naive
+    'YYYY-MM-DD HH:MM:SS' and ISO 'YYYY-MM-DDTHH:MM:SSZ'.  Sorting the raw
+    strings puts every space-format row before every 'T'-format row (space
+    < 'T'), which scrambles the event order.  That matters because the
+    CNN/LSTM rolling buffer is filled in row order, so scrambled rows give
+    the model time windows that are out of sequence.
+
+    Parse the timestamps first and sort on those (stable, so rows with the
+    same time or unparseable times keep their input order and sort last).
+    """
+    if 'dataTime' not in event_df.columns:
+        return event_df
+    parsed = pd.to_datetime(event_df['dataTime'], format='ISO8601',
+                            utc=True, errors='coerce')
+    if parsed.isna().any():
+        # ISO8601 covers both common shapes; 'mixed' retries any stragglers
+        # (e.g. other date orders) element by element.
+        parsed = parsed.fillna(
+            pd.to_datetime(event_df['dataTime'], format='mixed',
+                           utc=True, errors='coerce'))
+    if parsed.notna().sum() == 0:
+        # Nothing parseable - leave the input order untouched.
+        return event_df
+    sort_col = '__parsed_dataTime__'
+    while sort_col in event_df.columns:
+        sort_col = '_' + sort_col
+    return (event_df.assign(**{sort_col: parsed})
+                    .sort_values(sort_col, kind='stable', na_position='last')
+                    .drop(columns=[sort_col]))
+
+
+def _interpolate_missing(values):
+    """Fill missing (NaN/inf) samples by linear interpolation (both directions).
+
+    Used for the feature-extraction path, which needs a continuous series for
+    high-pass filtering and fixed 125-sample windows: dropping samples would
+    break window geometry, and zero-filling injects non-physical 0 mg steps.
+    An entirely-missing series (e.g. no-3D stale data) maps to all zeros,
+    preserving the legacy behaviour for that case.
+    """
+    arr = np.asarray(values, dtype=float).ravel()
+    if arr.size == 0:
+        return arr
+    # inf is corruption, not data: treat like missing
+    arr[~np.isfinite(arr)] = np.nan
+    if np.isnan(arr).all():
+        return np.zeros_like(arr)
+    if not np.isnan(arr).any():
+        return arr
+    idx = np.arange(arr.size)
+    valid = ~np.isnan(arr)
+    return np.interp(idx, idx[valid], arr[valid])
+
+
+# Move process_event to top-level function
+def process_event_simple(args):
+    """
+    Lightweight event processor for simpleMagnitudeOnly mode.
+    Skips heavy spectral/feature calculations and only extracts raw acceleration data.
+    """
+    eventId, event_df, window, step, features = args
+    event_df = sort_event_by_time(event_df)
+    userId = event_df['userId'].iloc[0] if 'userId' in event_df else None
+    typeStr = event_df['typeStr'].iloc[0] if 'typeStr' in event_df else None
+    typeVal = event_df['type'].iloc[0] if 'type' in event_df else None
+    
+    # Determine which raw features are needed
+    need_magnitude = 'acc_magnitude' in features
+    need_xyz = any(f in features for f in ['accX', 'accY', 'accZ'])
+    
+    # Build raw axis arrays - only for needed features
+    acc_mag = [] if need_magnitude else None
+    accX = [] if need_xyz else None
+    accY = [] if need_xyz else None
+    accZ = [] if need_xyz else None
+    
+    # Build metadata arrays (one value per sample = 125 samples per row)
+    # This ensures each window gets the correct metadata for its timebase
+    meta_cols = ['dataTime', 'osdAlarmState', 'osdSpecPower', 'osdRoiPower', 'hr', 'o2sat']
+    meta_arrays = {col: [] for col in meta_cols}
+    
+    # Handle both M000 and M000_t-0 naming conventions
+    _suffix_simple = "_t-0" if "M000_t-0" in event_df.columns else ""
+    # Also handle case where X000_t-0 exists but M doesn't (fallback to no suffix if not found)
+    if _suffix_simple == "_t-0" and "X000_t-0" not in event_df.columns and "X000" in event_df.columns:
+        # Mixed file? Prefer no suffix for X/Y/Z if suffix not present there
+        pass
+    for _, row in event_df.iterrows():
+        if need_magnitude:
+            acc_mag.extend([row.get(f"M{n:03d}{_suffix_simple}", row.get(f"M{n:03d}", np.nan)) for n in range(125)])
+        if need_xyz:
+            # Try suffix then fallback to no suffix
+            accX.extend([row.get(f"X{n:03d}{_suffix_simple}", row.get(f"X{n:03d}", np.nan)) for n in range(125)])
+            accY.extend([row.get(f"Y{n:03d}{_suffix_simple}", row.get(f"Y{n:03d}", np.nan)) for n in range(125)])
+            accZ.extend([row.get(f"Z{n:03d}{_suffix_simple}", row.get(f"Z{n:03d}", np.nan)) for n in range(125)])
+        # Extend metadata for 125 samples (each sample inherits the row's metadata)
+        for col in meta_cols:
+            meta_arrays[col].extend([row.get(col, np.nan)] * 125)
+    
+    total_samples = len(acc_mag) if need_magnitude else len(accX)
+    
+    # Split into windows
+    rows = []
+    for start in range(0, total_samples - window + 1, step):
+        end = start + window
+        row_dict = {
+            'eventId': eventId,
+            'userId': userId,
+            'typeStr': typeStr,
+            'type': typeVal,
+            'dataTime': meta_arrays['dataTime'][end-1] if end-1 < len(meta_arrays['dataTime']) else np.nan,
+            'osdAlarmState': meta_arrays['osdAlarmState'][end-1] if end-1 < len(meta_arrays['osdAlarmState']) else np.nan,
+            'hr': meta_arrays['hr'][end-1] if end-1 < len(meta_arrays['hr']) else np.nan,
+            'o2sat': meta_arrays['o2sat'][end-1] if end-1 < len(meta_arrays['o2sat']) else np.nan,
+            'startSample': start,
+            'endSample': end
+        }
+        # Only include columns for requested features
+        if need_magnitude:
+            for i in range(window):
+                row_dict[f"M{i:03d}"] = acc_mag[start + i]
+        if need_xyz:
+            for i in range(window):
+                row_dict[f"X{i:03d}"] = accX[start + i]
+                row_dict[f"Y{i:03d}"] = accY[start + i]
+                row_dict[f"Z{i:03d}"] = accZ[start + i]
+        rows.append(row_dict)
+    return rows
+
+
+def process_event(args):
+    eventId, event_df, window, step, features, highPassFreq, highPassOrder, debug = args
+    event_df = sort_event_by_time(event_df)
+    acc_mag, accX, accY, accZ = [], [], [], []
+    userId = event_df['userId'].iloc[0] if 'userId' in event_df else None
+    typeStr = event_df['typeStr'].iloc[0] if 'typeStr' in event_df else None
+    typeVal = event_df['type'].iloc[0] if 'type' in event_df else None
+
+    # Interpolate HR and O2SAT values onto same timebase as accelerometer data.
+    # Use separate sample indices for each signal to handle sparse/mismatched data correctly
+    hr_raw, o2sat_raw = [], []
+    hr_indices, o2sat_indices = [], []
+    sample_count = 0
+    for _, row in event_df.iterrows():
+        hr_val = row.get('hr', np.nan)
+        o2sat_val = row.get('o2sat', np.nan)
+        # Robust NaN checks that handle None/strings without raising TypeError
+        try:
+            hr_is_nan = np.isnan(hr_val)
+        except TypeError:
+            hr_is_nan = pd.isna(hr_val)
+        try:
+            o2sat_is_nan = np.isnan(o2sat_val)
+        except TypeError:
+            o2sat_is_nan = pd.isna(o2sat_val)
+        if not hr_is_nan:
+            hr_raw.append(float(hr_val))
+            hr_indices.append(sample_count)
+        if not o2sat_is_nan:
+            o2sat_raw.append(float(o2sat_val))
+            o2sat_indices.append(sample_count)
+        sample_count += 125
+    total_samples = len(event_df) * 125
+    if len(hr_raw) == 0:
+        hr_interp = np.full(total_samples, np.nan)
+    else:
+        hr_interp = np.interp(np.arange(total_samples), hr_indices, hr_raw)
+    if len(o2sat_raw) == 0:
+        o2sat_interp = np.full(total_samples, np.nan)
+    else:
+        o2sat_interp = np.interp(np.arange(total_samples), o2sat_indices, o2sat_raw)
+
+    # Produce a single time series of each accelerometer axis, covering the entire event.
+    # Flattened CSV uses M000... without suffix, but some older files use M000_t-0.
+    # Detect suffix dynamically so we handle both.
+    _suffix = "_t-0" if "M000_t-0" in event_df.columns else ""
+    for _, row in event_df.iterrows():
+        acc_mag.extend([row.get(f"M{n:03d}{_suffix}", np.nan) for n in range(125)])
+        accX.extend([row.get(f"X{n:03d}{_suffix}", np.nan) for n in range(125)])
+        accY.extend([row.get(f"Y{n:03d}{_suffix}", np.nan) for n in range(125)])
+        accZ.extend([row.get(f"Z{n:03d}{_suffix}", np.nan) for n in range(125)])
+
+    # Convert lists to numpy arrays
+    acc_mag = np.array(acc_mag, dtype=float)
+    accX = np.array(accX, dtype=float)
+    accY = np.array(accY, dtype=float)
+    accZ = np.array(accZ, dtype=float)
+    hr_interp = np.array(hr_interp, dtype=float)
+    o2sat_interp = np.array(o2sat_interp, dtype=float)
+
+    # Fill missing samples by linear interpolation (both directions) before
+    # filtering: filtfilt cannot propagate NaN into model inputs (loss=nan),
+    # and interpolation across a short hole is far less pathological than the
+    # 0 mg zero-fill it replaces (non-physical for a ~1000 mg sensor).
+    # Whole-datapoint gaps are NOT bridged here: flattenData leaves them as
+    # time discontinuities and rolling-buffer consumers restart there; this
+    # interpolation only covers within-datapoint sample holes.  An axis that
+    # is entirely missing (stale allData.csv events without 3D despite
+    # require3dData=true) keeps the legacy all-zeros series.
+    acc_mag = _interpolate_missing(acc_mag)
+    accX = _interpolate_missing(accX)
+    accY = _interpolate_missing(accY)
+    accZ = _interpolate_missing(accZ)
+
+    # Apply high pass filter to accelerometer data to remove gravity and slow movement components.
+    if (highPassFreq is not None):
+        acc_mag = high_pass_filter(acc_mag, cutoff=highPassFreq, fs=25, order=highPassOrder)
+        accX = high_pass_filter(accX, cutoff=highPassFreq, fs=25, order=highPassOrder)
+        accY = high_pass_filter(accY, cutoff=highPassFreq, fs=25, order=highPassOrder)
+        accZ = high_pass_filter(accZ, cutoff=highPassFreq, fs=25, order=highPassOrder)
+
+    # Transpose values from datapoint meta data onto accelerometer data timebase
+    meta_cols = ['dataTime', 'osdAlarmState', 'osdSpecPower', 'osdRoiPower', 'hr', 'o2sat']
+    meta_arrays = {col: [] for col in meta_cols}
+    for _, row in event_df.iterrows():
+        for col in meta_cols:
+            meta_arrays[col].extend([row.get(col, np.nan)] * 125)
+    meta_arrays['hr'] = hr_interp.tolist()
+    meta_arrays['o2sat'] = o2sat_interp.tolist()
+
+    # Split the data into overlapping windows/epochs
+    total_samples = len(acc_mag)
+    rows = []
+    for start in range(0, total_samples - window + 1, step):
+        end = start + window
+        acc_mag_window = acc_mag[start:end]
+        accX_window = accX[start:end]
+        accY_window = accY[start:end]
+        accZ_window = accZ[start:end]
+
+        # Create a dictionary to hold the epoch data
+        epoch_data = {
+            'x': accX_window,
+            'y': accY_window,
+            'z': accZ_window,
+            'magnitude': acc_mag_window,
+            'hr': hr_interp[start:end],
+            'o2sat': o2sat_interp[start:end]
+        }
+        # Define frequency bands for feature extraction
+        freq_bands = {
+            'osdRoi': (3.0, 8.0),
+            'osdSpec': (0.5, 12.5),
+            'osdFlap': (2.0, 4.0),
+            'seizure_main': (1.0, 4.0),
+            'initial_clonus': (3.0, 5.0),
+            'late_clonus': (1.0, 2.0),
+            '1-3Hz': (1.0, 3.0),
+            '2-4Hz': (2.0, 4.0),
+            '3-5Hz': (3.0, 5.0),
+            '4-6Hz': (4.0, 6.0),
+            '5-7Hz': (5.0, 7.0),
+            '6-8Hz': (6.0, 8.0),
+            '7-9Hz': (7.0, 9.0),
+            '8-10Hz': (8.0, 10.0)
+        }
+
+        # Calculate features for the current epoch
+        featuresObj = accelFeatures.calculate_epoch_features(epoch_data, sf=25, freq_bands=freq_bands)
+
+        # Build the output row
+        row = {
+            'eventId': eventId,
+            'userId': userId,
+            'typeStr': typeStr,
+            'type': typeVal,
+            'dataTime': meta_arrays['dataTime'][end-1] if end-1 < len(meta_arrays['dataTime']) else np.nan,
+            'osdAlarmState': meta_arrays['osdAlarmState'][end-1] if end-1 < len(meta_arrays['osdAlarmState']) else np.nan,
+            'osdSpecPower': meta_arrays['osdSpecPower'][end-1] if end-1 < len(meta_arrays['osdSpecPower']) else np.nan,
+            'osdRoiPower': meta_arrays['osdRoiPower'][end-1] if end-1 < len(meta_arrays['osdRoiPower']) else np.nan,
+            'hr': meta_arrays['hr'][end-1] if end-1 < len(meta_arrays['hr']) else np.nan,
+            'o2sat': meta_arrays['o2sat'][end-1] if end-1 < len(meta_arrays['o2sat']) else np.nan,
+            'startSample': start,
+            'endSample': end
+        }
+        # Always include all calculated features from featuresObj
+        for feature_name, feature_value in featuresObj.items():
+            row[feature_name] = feature_value
+
+        for i in range(window):
+            row[f"M{i:03d}_t-0"] = acc_mag[start + i]
+        for i in range(window):
+            row[f"X{i:03d}_t-0"] = accX[start + i]
+        for i in range(window):
+            row[f"Y{i:03d}_t-0"] = accY[start + i]
+        for i in range(window):
+            row[f"Z{i:03d}_t-0"] = accZ[start + i]
+
+        rows.append(row)
+    return rows
+
+def low_pass_filter(data, cutoff=0.5, fs=25, order=4):
+    """
+    Applies a digital 1st-o rder Butterworth low-pass filter to time series data.
+    
+    Parameters:
+        data (array-like): Input signal array
+        cutoff (float): Cutoff frequency in Hz (default: 0.5)
+        fs (int): Sampling frequency in Hz (default: 25)
+        order (int): Filter order (default: 4, higher gives sharper transition but may amplify noise)
+        
+    Returns:
+        filtered_data (array-like): The filtered signal
+    """
+    nyquist = 0.5 * fs  # Nyquist frequency is half the sampling rate
+    normal_cutoff = cutoff / nyquist
+    
+    # Create Butterworth low-pass filter with given order and normalized  cutoff frequency
+    b, a = scipy.signal.butter(order, normal_cutoff, analog=False)
+    
+    # Apply zero-phase filtering
+    filtered_data = scipy.signal.filtfilt(b, a, data)
+    
+    return filtered_data
+
+
+def high_pass_filter(data, cutoff=0.5, fs=25, order=2):
+    """
+    Applies a digital 1st-order Butterworth high-pass filter to time series data.
+    
+    Parameters:
+        data (array-like): Input signal array
+        cutoff (float): High-pass cutoff frequency in Hz (default: 0.5)
+        fs (int): Sampling frequency in Hz (default: 25)
+        order (int): Filter order (default: 4, higher gives sharper transition but may amplify noise)
+        
+    Returns:
+        filtered_data (array-like): The high-pass filtered signal
+    """
+    nyquist = 0.5 * fs  # Nyquist frequency is half the sampling rate
+    normal_cutoff = cutoff / nyquist
+    
+    # Create Butterworth high-pass filter with given order and normalized cutoff frequency
+    b, a = scipy.signal.butter(order, normal_cutoff, analog=False, btype='high')
+    
+    # Apply zero-phase filtering
+    filtered_data = scipy.signal.filtfilt(b, a, data)
+    
+    return filtered_data
+
+
+
+_META_COLS = ['eventId', 'userId', 'typeStr', 'type', 'dataTime', 'osdAlarmState',
+               'osdSpecPower', 'osdRoiPower', 'hr', 'o2sat', 'startSample', 'endSample']
+_HEADER_CHECK_COLS = ['eventId', 'userId', 'typeStr', 'type', 'dataTime']
+_RAW_PREFIXES = ('M', 'X', 'Y', 'Z')
+
+
+def _ordered_feature_columns(all_columns):
+    """Column order used for final feature files: metadata, calculated
+    features (sorted), then raw accelerometer columns. Unknown columns are
+    dropped, matching the historical layout exactly."""
+    cols = list(all_columns)
+    raw_cols = [c for c in cols if isinstance(c, str) and c.startswith(_RAW_PREFIXES)]
+    calculated = [c for c in cols if c not in _META_COLS and c not in raw_cols]
+    ordered = _META_COLS + sorted(calculated) + raw_cols
+    return [c for c in ordered if c in cols]
+
+
+def _clean_postprocess_chunk(chunk):
+    """Apply the standard post-processing to one chunk: drop accidental
+    header-rows and coerce 'type' to numeric. Returns (chunk, n_seizure,
+    n_nonseizure). Identical semantics to the former whole-frame cleanup."""
+    mask = pd.Series(False, index=chunk.index)
+    for c in _HEADER_CHECK_COLS:
+        if c in chunk.columns:
+            mask |= chunk[c].astype(str).str.strip().str.lower() == c.lower()
+    if mask.any():
+        chunk = chunk[~mask].reset_index(drop=True)
+    n_seizure = n_nonseizure = 0
+    if 'type' in chunk.columns:
+        chunk['type'] = pd.to_numeric(chunk['type'].astype(str).str.strip(),
+                                      errors='coerce')
+        n_seizure = int((chunk['type'] == 1).sum())
+        n_nonseizure = int((chunk['type'] == 0).sum())
+    return chunk, n_seizure, n_nonseizure
+
+
+def _postprocess_streamed_tmp(tmp_path, final_path, chunk_rows=200000):
+    """Column-order, clean and copy the streamed temp CSV to its final path
+    in chunks, so peak memory stays O(chunk) regardless of file size.
+
+    This replaces the former "read the whole temp file into one DataFrame"
+    step, which needed ~2x the file size in RAM (float64) plus full-frame
+    copies for reordering/filtering - the swap-thrash stall. Output bytes are
+    identical: same column order, same header-row cleanup, same type coercion,
+    same row order, same pandas CSV writer.
+
+    Returns (n_rows, n_seizure, n_nonseizure).
+    """
+    import os as _os
+    import time as _time
+    if _os.path.abspath(tmp_path) == _os.path.abspath(final_path):
+        raise ValueError("_postprocess_streamed_tmp: tmp and final paths must differ")
+
+    all_columns = list(pd.read_csv(tmp_path, nrows=0).columns)
+    ordered_cols = _ordered_feature_columns(all_columns)
+    try:
+        _sz = _os.path.getsize(tmp_path)
+        print(f"[extractFeatures] Post-processing {tmp_path} "
+              f"({_sz} bytes, {_sz / (1024**3):.2f} GB) in {chunk_rows}-row chunks "
+              f"-> {final_path} ...", flush=True)
+    except Exception:
+        print(f"[extractFeatures] Post-processing {tmp_path} in {chunk_rows}-row "
+              f"chunks -> {final_path} ...", flush=True)
+
+    total_rows = 0
+    total_seizure = 0
+    total_nonseizure = 0
+    first_write = True
+    t_start = _time.time()
+    n_chunks = 0
+    for chunk in pd.read_csv(tmp_path, chunksize=chunk_rows, low_memory=False):
+        n_chunks += 1
+        chunk = chunk[ordered_cols]
+        chunk, n_seiz, n_non = _clean_postprocess_chunk(chunk)
+        chunk.to_csv(final_path, mode='w' if first_write else 'a',
+                     header=first_write, index=False)
+        first_write = False
+        total_rows += len(chunk)
+        total_seizure += n_seiz
+        total_nonseizure += n_non
+        elapsed = _time.time() - t_start
+        rate = total_rows / elapsed if elapsed > 0 else 0
+        print(f"[extractFeatures][postprocess] chunk {n_chunks}: {total_rows} rows "
+              f"written ({rate:.0f} rows/s, elapsed={elapsed:.0f}s)", flush=True)
+    if first_write:
+        # No data rows at all - still write the header so downstream has a schema.
+        pd.DataFrame(columns=ordered_cols).to_csv(final_path, index=False)
+        print("[extractFeatures][postprocess] no data rows - wrote header only",
+              flush=True)
+    elapsed = _time.time() - t_start
+    print(f"[extractFeatures][postprocess] done: {total_rows} rows "
+          f"({total_seizure} seizure, {total_nonseizure} non-seizure) "
+          f"in {elapsed:.0f}s", flush=True)
+    return total_rows, total_seizure, total_nonseizure
+
+
+def extract_features(df, configObj, debug=False):
+    # Data processing parameters
+    window = configObj['dataProcessing'].get('window', 125)
+    step = configObj['dataProcessing'].get('step', window)
+    features = configObj['dataProcessing']['features']
+    highPassFreq = configObj['dataProcessing'].get('highPassFreq', None)
+    highPassOrder = configObj['dataProcessing'].get('highPassOrder', 2)
+    simpleMagnitudeOnly = configObj['dataProcessing'].get('simpleMagnitudeOnly', False)
+
+    # Performance / IO tuning knobs (optional in config)
+    worker_count = configObj.get('dataProcessing', {}).get('worker_count', None)
+    batch_size = configObj.get('dataProcessing', {}).get('batch_size', 1000)
+    stream_chunksize = configObj.get('dataProcessing', {}).get('stream_chunksize', 20000)
+    progress_interval = configObj.get('dataProcessing', {}).get('progress_interval', 100)
+
+    # If worker_count not set, use CPU count - 1 (leave one core free) but at least 1
+    import multiprocessing as _mp
+    import time
+    if worker_count is None:
+        try:
+            worker_count = max(1, _mp.cpu_count() - 1)
+        except Exception:
+            worker_count = 1
+
+    print("extract_features():  window=%d, step=%d" % (window, step))
+    if highPassFreq is not None:
+        print("extract_features(): highPassFreq=%.1f, highPassOrder=%d" % (highPassFreq, highPassOrder))
+    else:
+        print(f"extract_features(): highPassFreq=None, highPassOrder={highPassOrder}")
+
+    # We'll compute input statistics differently depending on whether `df`
+    # is an in-memory DataFrame or a filename (streaming mode).
+
+    import multiprocessing
+    print("extract_features():  grouping events by eventId")
+
+    # If df is small (already loaded), we can process similarly to before.
+    if isinstance(df, pd.DataFrame) and len(df) < 200000:
+        # Statistics for input (in-memory)
+        input_seizure = (df['type'] == 1).sum()
+        input_nonseizure = (df['type'] == 0).sum()
+        print(f"extract_features(): Input rows: {len(df)}")
+        print(f"extract_features():   Seizure rows (type=1): {input_seizure}")
+        print(f"extract_features():   Non-seizure rows (type=0): {input_nonseizure}")
+
+        grouped = df.groupby('eventId', sort=False)
+        total_events = grouped.ngroups
+        print("extractFeatures() - analysing each event in turn.... (parallel)")
+        event_args = [
+            (eventId, event_df.copy(), window, step, features, highPassFreq, highPassOrder, debug)
+            for eventId, event_df in grouped
+        ]
+        # Use imap_unordered so we can report progress as results arrive
+        # Use multiprocessing to process each event. If simpleMagnitudeOnly is set
+        # we can use a much lighter-weight per-event processor that skips the
+        # heavy spectral/feature calculations.
+        if simpleMagnitudeOnly:
+            print("extractFeatures() - simpleMagnitudeOnly mode enabled; using lightweight processing")
+            event_args = [
+                (eventId, event_df.copy(), window, step, features)
+                for eventId, event_df in grouped
+            ]
+            with multiprocessing.Pool(processes=worker_count) as pool:
+                it = pool.imap_unordered(process_event_simple, event_args)
+                out_rows = []
+                processed = 0
+                start_time = time.time()
+                for res in it:
+                    out_rows.extend(res)
+                    processed += 1
+                    if processed % progress_interval == 0 or processed == total_events:
+                        elapsed = time.time() - start_time
+                        pct = (processed / total_events) * 100
+                        pct = min(100.0, pct)
+                        elapsed_str = time.strftime('%Hh%Mm%Ss', time.gmtime(int(elapsed)))
+                        print(f"[extractFeatures][progress] {processed}/{total_events} events ({pct:.1f}%) elapsed={elapsed_str}")
+            out_df = pd.DataFrame(out_rows)
+            print("extractFeatures() - finished (simpleMagnitudeOnly) processing events")
+        else:
+            with multiprocessing.Pool(processes=worker_count) as pool:
+                it = pool.imap_unordered(process_event, event_args)
+                out_rows = []
+                processed = 0
+                start_time = time.time()
+                for res in it:
+                    out_rows.extend(res)
+                    processed += 1
+                    if processed % progress_interval == 0 or processed == total_events:
+                        elapsed = time.time() - start_time
+                        rate = processed / elapsed if elapsed > 0 else None
+                        eta = None
+                        if rate and rate > 0:
+                            remaining = max(0, total_events - processed)
+                            eta = remaining / rate
+                        pct = (processed / total_events) * 100
+                        pct = min(100.0, pct)
+                        if eta is not None:
+                            hrs, rem = divmod(int(eta), 3600)
+                            mins, secs = divmod(rem, 60)
+                            eta_str = f"{hrs:d}h{mins:02d}m{secs:02d}s" if hrs else f"{mins:02d}m{secs:02d}s"
+                            elapsed_str = time.strftime('%Hh%Mm%Ss', time.gmtime(int(elapsed)))
+                            eta_time_str = time.strftime('%H:%M:%S', time.localtime(time.time() + eta))
+                            print(f"[extractFeatures][progress] {processed}/{total_events} events ({pct:.1f}%) rate={rate:.2f} ev/s elapsed={elapsed_str} ETA={eta_str} ETA_time={eta_time_str}")
+                        else:
+                            elapsed_str = time.strftime('%Hh%Mm%Ss', time.gmtime(int(elapsed)))
+                            print(f"[extractFeatures][progress] {processed}/{total_events} events ({pct:.1f}%) elapsed={elapsed_str}")
+            out_df = pd.DataFrame(out_rows)
+            print("extractFeatures() - finished processing events")
+        # continue to ordering and return
+    else:
+        # df is not an in-memory DataFrame of manageable size. Assume caller
+        # provided a filename earlier and used streaming helpers; but if
+        # df is a string filename here, handle streaming read.
+        if isinstance(df, str):
+            inFname = df
+        else:
+            raise ValueError("extract_features: expected small DataFrame or filename for streaming")
+
+        # For streaming mode compute input statistics by scanning the file in chunks
+        total_rows = 0
+        seizure_count = 0
+        nonseizure_count = 0
+        for chunk in pd.read_csv(inFname, usecols=['type'], chunksize=200000, low_memory=False):
+            total_rows += len(chunk)
+            if 'type' in chunk:
+                seizure_count += (chunk['type'] == 1).sum()
+                nonseizure_count += (chunk['type'] == 0).sum()
+
+        print(f"extract_features(): Input rows: {total_rows}")
+        print(f"extract_features():   Seizure rows (type=1): {seizure_count}")
+        print(f"extract_features():   Non-seizure rows (type=0): {nonseizure_count}")
+        # Stream events and process in parallel, writing output incrementally
+        pool = multiprocessing.Pool(processes=worker_count)
+        out_rows = []
+        out_df = None
+        first_write = True
+        print("extractFeatures() - streaming events and processing in parallel")
+        # Ensure we have a unique temporary filename for this run
+        tmp_path = configObj['dataFileNames'].get('streamTmpOut', None)
+        if tmp_path is None:
+            import tempfile
+            import os
+            fd, tmp_path = tempfile.mkstemp(suffix='.csv')
+            os.close(fd)
+            configObj.setdefault('dataFileNames', {})
+            configObj['dataFileNames']['streamTmpOut'] = tmp_path
+        try:
+            # Use imap_unordered for early results and lower memory footprint
+            # Choose processor based on simpleMagnitudeOnly mode
+            if simpleMagnitudeOnly:
+                print("extractFeatures() - simpleMagnitudeOnly mode enabled for streaming; using lightweight processing")
+                processor_func = process_event_simple
+                event_args_gen = (
+                    (eventId, event_df, window, step, features)
+                    for eventId, event_df in io_utils.stream_events_from_flattened_csv(inFname, chunksize=stream_chunksize)
+                )
+            else:
+                processor_func = process_event
+                event_args_gen = (
+                    (eventId, event_df, window, step, features, highPassFreq, highPassOrder, debug)
+                    for eventId, event_df in io_utils.stream_events_from_flattened_csv(inFname, chunksize=stream_chunksize)
+                )
+            
+            it = pool.imap_unordered(processor_func, event_args_gen)
+            batch = []
+            processed_events = 0
+            start_time = time.time()
+            # Try to compute total events for a percentage if feasible (streaming)
+            total_events = None
+            try:
+                # Use the same event-streaming generator we use for processing to
+                # compute the total number of event blocks. This guarantees the
+                # count matches the processing semantics (handles chunking,
+                # quoted fields, and events spanning chunk boundaries).
+                total_events = 0
+                for _eventId, _edf in io_utils.stream_events_from_flattened_csv(inFname, chunksize=stream_chunksize):
+                    total_events += 1
+            except Exception:
+                total_events = None
+
+            for rows in it:
+                # rows is list of dicts
+                batch.extend(rows)
+                processed_events += 1
+                if total_events and (processed_events % progress_interval == 0 or processed_events == total_events):
+                    elapsed = time.time() - start_time
+                    rate = processed_events / elapsed if elapsed > 0 else None
+                    if rate and rate > 0:
+                        remaining = max(0, total_events - processed_events)
+                        eta = remaining / rate
+                        hrs, rem = divmod(int(eta), 3600)
+                        mins, secs = divmod(rem, 60)
+                        eta_str = f"{hrs:d}h{mins:02d}m{secs:02d}s" if hrs else f"{mins:02d}m{secs:02d}s"
+                        pct = (processed_events / total_events) * 100
+                        pct = min(100.0, pct)
+                        elapsed_str = time.strftime('%Hh%Mm%Ss', time.gmtime(int(elapsed)))
+                        eta_time_str = time.strftime('%H:%M:%S', time.localtime(time.time() + eta))
+                        print(f"[extractFeatures][progress] {processed_events}/{total_events} events ({pct:.1f}%) rate={rate:.2f} ev/s elapsed={elapsed_str} ETA={eta_str} ETA_time={eta_time_str}")
+                    else:
+                        pct = (processed_events / total_events) * 100
+                        pct = min(100.0, pct)
+                        elapsed_str = time.strftime('%Hh%Mm%Ss', time.gmtime(int(elapsed)))
+                        print(f"[extractFeatures][progress] {processed_events}/{total_events} events processed ({pct:.1f}%) elapsed={elapsed_str}")
+                if len(batch) >= batch_size:
+                    if out_df is None:
+                        # write header first time
+                        io_utils.write_rows_batch_csv(tmp_path, batch, header=True, mode='a')
+                        out_df = True
+                    else:
+                        io_utils.write_rows_batch_csv(tmp_path, batch, header=False, mode='a')
+                    batch = []
+
+            # write remaining
+            if batch:
+                print(f"[extractFeatures] Flushing final batch {len(batch)} rows to {tmp_path}", flush=True)
+                io_utils.write_rows_batch_csv(tmp_path, batch, header=first_write, mode='a')
+                batch = []
+            print(f"[extractFeatures] All events streamed to temp file - flushing and joining pool...", flush=True)
+        finally:
+            pool.close()
+            pool.join()
+            print(f"[extractFeatures] Pool joined - all workers finished (100% events processed)", flush=True)
+
+        # Post-process the streamed file in chunks straight to its final
+        # destination (see streamFinalOut, set by extractFeatures()). Peak
+        # memory stays O(chunk) instead of ~2x the file size, and progress is
+        # reported per chunk. Returns None - the final file IS the result.
+        tmp_path = configObj['dataFileNames'].get('streamTmpOut', None)
+        if tmp_path is None:
+            raise RuntimeError('No temporary stream output path available')
+        final_path = configObj['dataFileNames'].get('streamFinalOut', None)
+        if final_path is None:
+            final_path = tmp_path + '.ordered.csv'
+            print(f"[extractFeatures] No streamFinalOut configured - writing "
+                  f"ordered output to {final_path}", flush=True)
+        chunk_rows = configObj.get('dataProcessing', {}).get('postprocess_chunksize', 200000)
+        try:
+            chunk_rows = max(1000, int(chunk_rows))
+        except Exception:
+            chunk_rows = 200000
+
+        # Report temp file size before post-processing (helps diagnose stall at 100%)
+        try:
+            import os as _os
+            if _os.path.exists(tmp_path):
+                _sz = _os.path.getsize(tmp_path)
+                _sz_gb = _sz / (1024**3)
+                print(f"[extractFeatures] Temp file ready: {tmp_path} size={_sz} bytes ({_sz_gb:.2f} GB) - post-processing in chunks (no full-frame load)...", flush=True)
+                try:
+                    import psutil
+                    _vm = psutil.virtual_memory()
+                    _swap = psutil.swap_memory()
+                    print(f"[extractFeatures][MEM] before postprocess: avail={_vm.available/1e9:.2f}GB swap_used={_swap.used/1e9:.2f}/{_swap.total/1e9:.2f}GB", flush=True)
+                except Exception:
+                    pass
+            else:
+                print(f"[extractFeatures] WARNING: temp file not found at {tmp_path}", flush=True)
+        except Exception as _e:
+            print(f"[extractFeatures] Could not stat temp file: {_e}", flush=True)
+
+        n_rows, n_seiz, n_non = _postprocess_streamed_tmp(
+            tmp_path, final_path, chunk_rows=chunk_rows)
+        try:
+            import psutil as _ps2
+            _vm2 = _ps2.virtual_memory()
+            _swap2 = _ps2.swap_memory()
+            print(f"[extractFeatures][MEM] after postprocess: avail={_vm2.available/1e9:.2f}GB swap_used={_swap2.used/1e9:.2f}GB rss={_ps2.Process().memory_info().rss/1e9:.2f}GB", flush=True)
+        except Exception:
+            pass
+
+        # Clean up temporary streamed file to avoid accumulating large files
+        try:
+            import os
+            if os.path.exists(tmp_path):
+                print(f"[extractFeatures] Removing temp file {tmp_path}...", flush=True)
+                os.remove(tmp_path)
+                print(f"[extractFeatures] Temp file removed.", flush=True)
+        except Exception as _e:
+            print(f"[extractFeatures] Could not remove temp file: {_e}", flush=True)
+            # Not fatal; leave file if removal fails
+            pass
+
+        print(f"[extractFeatures] Streaming post-process complete: {n_rows} rows "
+              f"({n_seiz} seizure, {n_non} non-seizure) -> {final_path}", flush=True)
+        return None
+
+    # Ensure all calculated features are included
+    # Derive calculated features either from the rows computed in-memory or
+    # from the output DataFrame (streaming path).
+    calculated_features = set()
+    if out_rows:
+        for row in out_rows:
+            calculated_features.update([k for k in row.keys() if k not in ['eventId', 'userId', 'typeStr', 'type', 'dataTime', 'osdAlarmState', 'osdSpecPower', 'osdRoiPower', 'hr', 'o2sat', 'startSample', 'endSample'] and not k.startswith(('M', 'X', 'Y', 'Z'))])
+    else:
+        # infer from out_df column names
+        if out_df is not None:
+            for k in out_df.columns:
+                if k in ['eventId', 'userId', 'typeStr', 'type', 'dataTime', 'osdAlarmState', 'osdSpecPower', 'osdRoiPower', 'hr', 'o2sat', 'startSample', 'endSample']:
+                    continue
+                if k.startswith(('M', 'X', 'Y', 'Z')):
+                    continue
+                calculated_features.add(k)
+
+    # Order columns: metadata, calculated features, then raw data
+    meta_cols = ['eventId', 'userId', 'typeStr', 'type', 'dataTime', 'osdAlarmState', 'osdSpecPower', 'osdRoiPower', 'hr', 'o2sat', 'startSample', 'endSample']
+    raw_cols = [col for col in out_df.columns if col.startswith(('M', 'X', 'Y', 'Z'))]
+    feature_cols = sorted(list(calculated_features))
+    ordered_cols = meta_cols + feature_cols + raw_cols
+    ordered_cols = [col for col in ordered_cols if col in out_df.columns]
+    out_df = out_df[ordered_cols]
+
+    # Defensive cleanup: drop any accidental header-rows that may have been
+    # appended into the streamed CSV (these typically contain literal
+    # column names in metadata fields). Only check a small set of meta cols.
+    meta_check_cols = ['eventId', 'userId', 'typeStr', 'type', 'dataTime']
+    mask = pd.Series(False, index=out_df.index)
+    for c in meta_check_cols:
+        if c in out_df.columns:
+            mask |= out_df[c].astype(str).str.strip().str.lower() == c.lower()
+    if mask.any():
+        out_df = out_df[~mask].reset_index(drop=True)
+
+    # Ensure 'type' is numeric so comparisons below work reliably even if
+    # CSV contained strings like '0'/'1'. Leave NaN for unknowns.
+    if 'type' in out_df.columns:
+        out_df['type'] = pd.to_numeric(out_df['type'].astype(str).str.strip(), errors='coerce')
+        output_seizure = int((out_df['type'] == 1).sum())
+        output_nonseizure = int((out_df['type'] == 0).sum())
+    else:
+        output_seizure = 0
+        output_nonseizure = 0
+
+    print(f"[extractFeatures] Ordering columns (meta + {len(feature_cols)} features + {len(raw_cols)} raw) and cleaning header-rows...", flush=True)
+    print(f"Output rows: {len(out_df)}")
+    print(f"  Seizure rows (type=1): {output_seizure}")
+    print(f"  Non-seizure rows (type=0): {output_nonseizure}")
+    try:
+        import psutil as _ps3
+        print(f"[extractFeatures][MEM] post-ordering: avail={_ps3.virtual_memory().available/1e9:.2f}GB rss={_ps3.Process().memory_info().rss/1e9:.2f}GB", flush=True)
+    except Exception:
+        pass
+
+    return out_df
+def extractFeatures(inFname, outFname, configObj, debug=False):
+    """
+    Reads flattened CSV from inFname, extracts features, and writes to outFname.
+    """
+    # For large files we prefer streaming inside extract_features; pass the
+    # filename through and let extract_features decide how to process.
+    df_or_fname = inFname
+    # provide a temporary output file for streaming writer
+    stream_tmp = configObj.get('dataFileNames', {}).get('streamTmpOut', outFname + '.tmp.csv')
+    configObj.setdefault('dataFileNames', {})
+    configObj['dataFileNames']['streamTmpOut'] = stream_tmp
+    # final destination for the streaming path, which post-processes the temp
+    # file in chunks straight to here (it returns None once written).
+    configObj['dataFileNames']['streamFinalOut'] = outFname
+
+    df_feat = extract_features(df_or_fname, configObj, debug=debug)
+    if df_feat is None:
+        # streaming path already wrote the final file (chunked, O(chunk) RAM)
+        try:
+            import os as _os4
+            _sz = _os4.path.getsize(outFname)
+            print(f"[extractFeatures] Final features ready: {outFname} size={_sz} bytes ({_sz/1e9:.2f}GB)", flush=True)
+        except Exception:
+            print(f"[extractFeatures] Final features ready: {outFname}", flush=True)
+        return outFname
+    # in-memory path (small inputs / direct DataFrame calls) - write here.
+    # write final output - this is the stall point at 100% (disk IO, not CPU)
+    try:
+        import os as _os2
+        _rows, _cols = len(df_feat), len(df_feat.columns)
+        _est_bytes = _rows * _cols * 8  # rough estimate
+        print(f"[extractFeatures] Writing final features to {outFname} ({_rows} rows, {_cols} cols, est ~{_est_bytes/1e9:.2f}GB) - may take minutes and swap if >RAM...", flush=True)
+        try:
+            import psutil as _ps4
+            print(f"[extractFeatures][MEM] before final write: avail={_ps4.virtual_memory().available/1e9:.2f}GB rss={_ps4.Process().memory_info().rss/1e9:.2f}GB", flush=True)
+        except Exception:
+            pass
+    except Exception:
+        print(f"[extractFeatures] Writing final features to {outFname}...", flush=True)
+    df_feat.to_csv(outFname, index=False)
+    try:
+        import os as _os3
+        _sz = _os3.path.getsize(outFname)
+        print(f"[extractFeatures] Final write complete: {outFname} size={_sz} bytes ({_sz/1e9:.2f}GB)", flush=True)
+        try:
+            import psutil as _ps5
+            print(f"[extractFeatures][MEM] after final write: avail={_ps5.virtual_memory().available/1e9:.2f}GB rss={_ps5.Process().memory_info().rss/1e9:.2f}GB", flush=True)
+        except Exception:
+            pass
+    except Exception:
+        print(f"[extractFeatures] Final write complete: {outFname}", flush=True)
+    return outFname
+
+def main():
+    import argparse
+    import libosd.configUtils
+
+    parser = argparse.ArgumentParser(description='Extract features from flattened OSDB CSV')
+    parser.add_argument('--config', default="nnConfig.json")
+    parser.add_argument('-i', required=True, help='Input flattened CSV')
+    parser.add_argument('-o', help='Output CSV with features')
+    parser.add_argument('--test', action="store_true", help='Extract features for test data')
+    parser.add_argument('--debug', action="store_true")
+    args = parser.parse_args()
+
+    configObj = libosd.configUtils.loadConfig(args.config)
+
+    # Determine output file from config if not specified
+    if args.o:
+        out_csv = args.o
+    else:
+        if args.test:
+            out_csv = configObj['dataFileNames']['testFeaturesFileCsv']
+        else:
+            out_csv = configObj['dataFileNames']['trainFeaturesFileCsv']
+
+    # Pass filenames to the file wrapper, which streams instead of loading
+    # and returns the final output path.
+    out_csv = extractFeatures(args.i, out_csv, configObj, debug=args.debug)
+    print(f"Wrote features to {out_csv}")
+
+if __name__ == "__main__":
+    main()

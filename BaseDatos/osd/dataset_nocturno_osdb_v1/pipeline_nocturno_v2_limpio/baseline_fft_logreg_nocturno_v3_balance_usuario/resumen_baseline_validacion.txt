@@ -1,0 +1,99 @@
+BASELINE FFT + REGRESIÓN LOGÍSTICA — NOCTURNO V3 BALANCE USUARIO
+==============================================================================
+
+Este análisis usa únicamente TRAIN y VALIDATION.
+El conjunto TEST permanece sin utilizar.
+
+DATOS
+Train: 274 ventanas, 21 eventos
+Validation: 81 ventanas, 7 eventos
+Características: 19
+
+BALANCE DE ENTRENAMIENTO
+Peso igual por combinación usuario-clase y peso igual por evento dentro de cada combinación.
+userId  label  windows  events  total_weight
+  1643      0        7       1     45.666667
+  1643      1      186       7     45.666667
+    39      0       14       2     45.666667
+    39      1       12       1     45.666667
+    83      0       41       7     45.666667
+    83      1       14       3     45.666667
+
+SELECCIÓN DEL MODELO
+Mejor C: 100.0
+ROC-AUC ventana: 0.435528
+PR-AUC ventana: 0.692571
+
+UMBRAL YOUDEN — VENTANAS
+threshold: 0.976
+tn: 27.0
+fp: 0.0
+fn: 45.0
+tp: 9.0
+sensitivity: 0.16666666666666666
+specificity: 1.0
+fpr: 0.0
+precision: 1.0
+balanced_accuracy: 0.5833333333333334
+f1: 0.2857142857142857
+f2: 0.19999999999999996
+youden: 0.16666666666666674
+
+UMBRAL F2 — VENTANAS
+threshold: 0.096
+tn: 2.0
+fp: 25.0
+fn: 0.0
+tp: 54.0
+sensitivity: 1.0
+specificity: 0.07407407407407407
+fpr: 0.9259259259259259
+precision: 0.6835443037974683
+balanced_accuracy: 0.537037037037037
+f1: 0.8120300751879699
+f2: 0.9152542372881356
+youden: 0.07407407407407396
+
+EVALUACIÓN POR EVENTO — CUANTIL 70 %
+ROC-AUC evento: 0.500000
+PR-AUC evento: 0.633333
+threshold: 0.713
+tn: 4.0
+fp: 0.0
+fn: 2.0
+tp: 1.0
+sensitivity: 0.3333333333333333
+specificity: 1.0
+fpr: 0.0
+precision: 1.0
+balanced_accuracy: 0.6666666666666666
+f1: 0.5
+f2: 0.3846153846153846
+youden: 0.33333333333333326
+
+CARACTERÍSTICAS CON MAYOR PESO ABSOLUTO
+             feature  coefficient  absolute_coefficient
+          power_5_10    -8.828579              8.828579
+        power_8_12_5     7.768910              7.768910
+           power_3_8     5.839383              5.839383
+      peak_to_peak_g    -4.311657              4.311657
+total_power_0_2_12_5     3.610475              3.610475
+         power_0_2_1    -3.321804              3.321804
+               std_g     2.576139              2.576139
+       rms_dynamic_g     2.576139              2.576139
+           power_1_3    -1.682091              1.682091
+dominant_power_ratio    -1.284110              1.284110
+
+COMPARACIÓN CON NOCTURNO V2 LIMPIO
+ROC-AUC ventana modelo general V2: 0.636703
+ROC-AUC evento modelo general V2: 0.680556
+ROC-AUC ventana nocturno V2 limpio: 0.399177
+ROC-AUC evento nocturno V2 limpio: 0.500000
+Cambio ventana V3 balance - V2 limpio: +0.036351
+Cambio evento V3 balance - V2 limpio: +0.000000
+
+ADVERTENCIA DE TAMAÑO MUESTRAL
+VALIDATION nocturno contiene solo 7 eventos. Las métricas por evento pueden cambiar mucho con 1 solo evento; se interpretan como prueba de concepto, no como estimación clínica.
+
+INTERPRETACIÓN
+La separación sigue cercana al azar. Se deben revisar etiquetas/unidades antes de ampliar el modelo.

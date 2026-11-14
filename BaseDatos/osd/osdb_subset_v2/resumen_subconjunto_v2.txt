@@ -1,0 +1,30 @@
+SUBCONJUNTO AMPLIADO OSDB V2
+==============================================================================
+Semilla: 20261114
+
+EVENTOS SELECCIONADOS
+Tonic-Clonic: 120
+False Alarm difíciles: 40
+False Alarm otras: 20
+NDA: 60
+Positivos totales: 120
+Negativos totales: 120
+
+DATAPOINTS rawData[125]
+Tonic-Clonic: 4854
+False Alarm difíciles: 1351
+False Alarm otras: 672
+NDA: 2126
+Negativos totales: 4149
+
+EVENTOS DISPONIBLES QUE CUMPLÍAN EL FILTRO
+Tonic-Clonic con seizureTimes válido: 288
+False Alarm difíciles: 1179
+False Alarm otras: 11801
+NDA: 6151
+
+ARCHIVOS
+C:\Users\cesar\osd\osdb_subset_v2\osdb_3min_allSeizures.json
+C:\Users\cesar\osd\osdb_subset_v2\osdb_3min_falseAlarms.json
+C:\Users\cesar\osd\osdb_subset_v2\osdb_3min_ndaEvents.json
+C:\Users\cesar\osd\osdb_subset_v2\manifiesto_subconjunto_v2.csv

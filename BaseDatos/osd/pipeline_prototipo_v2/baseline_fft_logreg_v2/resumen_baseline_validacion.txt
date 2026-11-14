@@ -1,0 +1,84 @@
+BASELINE FFT + REGRESIÓN LOGÍSTICA — V2
+==============================================================================
+
+Este análisis usa únicamente TRAIN y VALIDATION.
+El conjunto TEST permanece sin utilizar.
+
+DATOS
+Train: 1780 ventanas, 143 eventos
+Validation: 671 ventanas, 48 eventos
+Características: 19
+
+SELECCIÓN DEL MODELO
+Mejor C: 0.01
+ROC-AUC ventana: 0.636703
+PR-AUC ventana: 0.820937
+
+UMBRAL YOUDEN — VENTANAS
+threshold: 0.446
+tn: 69.0
+fp: 98.0
+fn: 96.0
+tp: 408.0
+sensitivity: 0.8095238095238095
+specificity: 0.41317365269461076
+fpr: 0.5868263473053892
+precision: 0.8063241106719368
+balanced_accuracy: 0.6113487311092102
+f1: 0.8079207920792079
+f2: 0.8088818398096749
+youden: 0.22269746221842035
+
+UMBRAL F2 — VENTANAS
+threshold: 0.305
+tn: 10.0
+fp: 157.0
+fn: 0.0
+tp: 504.0
+sensitivity: 1.0
+specificity: 0.059880239520958084
+fpr: 0.9401197604790419
+precision: 0.762481089258699
+balanced_accuracy: 0.5299401197604791
+f1: 0.865236051502146
+f2: 0.941352259992529
+youden: 0.05988023952095811
+
+EVALUACIÓN POR EVENTO — CUANTIL 70 %
+ROC-AUC evento: 0.680556
+PR-AUC evento: 0.636657
+threshold: 0.518
+tn: 15.0
+fp: 9.0
+fn: 4.0
+tp: 20.0
+sensitivity: 0.8333333333333334
+specificity: 0.625
+fpr: 0.375
+precision: 0.6896551724137931
+balanced_accuracy: 0.7291666666666667
+f1: 0.7547169811320755
+f2: 0.8
+youden: 0.4583333333333335
+
+CARACTERÍSTICAS CON MAYOR PESO ABSOLUTO
+              feature  coefficient  absolute_coefficient
+           ratio_5_10     0.251174              0.251174
+               mean_g     0.166961              0.166961
+            ratio_3_8     0.134118              0.134118
+          power_0_2_1     0.111582              0.111582
+    max_abs_dynamic_g     0.058015              0.058015
+            power_1_3    -0.043705              0.043705
+           power_5_10    -0.042521              0.042521
+dominant_frequency_hz     0.041673              0.041673
+       peak_to_peak_g     0.034458              0.034458
+ autocorr_peak_0_2_2s    -0.028700              0.028700
+
+COMPARACIÓN CON V1
+ROC-AUC ventana V1: 0.638444
+ROC-AUC evento V1: 0.578125
+Cambio ROC-AUC ventana V2-V1: -0.001741
+Cambio ROC-AUC evento V2-V1: +0.102431
+
+INTERPRETACIÓN
+Existe señal débil. Conviene ampliar datos y ajustar características antes de evaluar test.

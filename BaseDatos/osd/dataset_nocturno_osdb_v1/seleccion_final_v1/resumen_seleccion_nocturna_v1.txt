@@ -1,0 +1,50 @@
+SELECCIÓN NOCTURNA OSDB V1
+==============================================================================
+
+ALCANCE
+Solo eventos compatibles con dormido/descansando. Se excluyen positivos con descripción explícita de levantarse/caminar/estar fuera de cama.
+Los negativos se limitan a los mismos usuarios que aportan positivos nocturnos.
+Se seleccionan hasta 2 negativos por positivo de cada usuario.
+
+POSITIVOS
+Candidatos iniciales: 18
+Excluidos fuera del alcance: 1
+Duplicados fusionados excluidos: 0
+Positivos retenidos: 17
+Positivos retenidos con nota de incertidumbre: 5
+
+NEGATIVOS
+Candidatos iniciales: 291
+Negativos de los mismos usuarios positivos: 134
+Duplicados fusionados excluidos: 12
+Negativos seleccionados: 18
+
+USUARIOS POSITIVOS
+1643, 39, 83
+
+RESUMEN POR USUARIO
+userId  positivos_nocturnos  negativos_nocturnos_disponibles  negativos_solicitados_2a1  negativos_seleccionados
+  1643                    9                                2                         18                        2
+    39                    4                               88                          8                        8
+    83                    4                               44                          8                        8
+
+TOTAL SELECCIÓN
+Positivos: 17
+Negativos: 18
+Eventos totales: 35
+
+POSITIVOS EXCLUIDOS FUERA DEL ALCANCE
+ eventId  userId                                                                                                                                                                                                                                                      desc
+   98163      39 A big one.  Got out of bed, fell over.   moved into recovery position after manual alarm raised. Stood up 07:11:25, circled a couple of times, fell onto back 07:11:57, rolled into recovery position 07:12:38. Includes data from merged event(s): 98167
+
+POSITIVOS RETENIDOS CON NOTA DE INCERTIDUMBRE
+ eventId  userId                                                                                                                           desc
+ 1333417    1643                                                                                                         ? seizure during sleep
+ 1343957    1643 Asleep but assuming seizure. Includes data from merged event(s): 1343937. Includes data from merged event(s): 1343926, 1343937
+ 1343962    1643                                                                                                    asleep but assuming seizure
+ 1343971    1643                                              asleep but assuming seizure. Includes data from merged event(s): 1343974, 1343999
+ 1354976    1643        ?Trigger/commencement of seizure. asleep.  partially aware of surroundings  Includes data from merged event(s): 1354980
+
+SIGUIENTE PASO
+Si esta selección es suficiente, extraer únicamente estos eventId desde los JSON completos de OSDB.
+Todavía NO se ha entrenado, dividido TRAIN/VALIDATION/TEST ni evaluado ningún modelo.

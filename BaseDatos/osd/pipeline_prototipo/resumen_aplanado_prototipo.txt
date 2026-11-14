@@ -1,0 +1,49 @@
+RESUMEN DEL APLANADO OSDB — PROTOTIPO
+========================================================================
+
+Configuración: C:\Users\cesar\osd\OpenSeizureDatabase\nnConfig_prototipo_pytorch.json
+Entrada JSON: C:\Users\cesar\osd\pipeline_prototipo\allData.json
+Salida CSV: C:\Users\cesar\osd\pipeline_prototipo\allData.csv
+
+CONFIGURACIÓN APLICADA
+useSeizureTimesConstraint: True
+seizureTimeMarginSeconds: 0.0
+validateDatapoints: True
+dcNormalisation: True
+
+DIMENSIONES
+Filas/datapoints: 1086
+Columnas: 510
+Eventos únicos totales: 80
+
+EVENTOS ÚNICOS
+Positivos (Seizure): 40
+Negativos (False Alarm + nda): 40
+
+FILAS DE CINCO SEGUNDOS
+Positivas type=1: 806
+Negativas type=0: 280
+Otras: 0
+Filas con M000..M124 completas: 1086
+
+DISTRIBUCIÓN type
+{1: 806, 0: 280}
+
+DISTRIBUCIÓN typeStr
+Seizure/Tonic-Clonic: 806
+nda/: 133
+False Alarm/: 126
+False Alarm/Other (Please describe in notes): 7
+False Alarm/Walking/Running/Cycling: 7
+False Alarm/Other: 7
+
+RANGO DE MAGNITUD M000..M124
+Mínimo: 75.292762
+Máximo: 5278.563251
+Media global: 1020.133174
+
+INTERPRETACIÓN
+Cada fila representa un datapoint de 5 s.
+M000..M124 son las 125 muestras de magnitud.
+type=1 corresponde a Seizure.
+type=0 corresponde a False Alarm o nda.

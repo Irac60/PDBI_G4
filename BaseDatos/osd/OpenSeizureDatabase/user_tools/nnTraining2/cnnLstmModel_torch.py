@@ -1,0 +1,719 @@
+#!/usr/bin/env python
+"""
+CNN-LSTM Model - PyTorch Implementation
+
+Combines a 1D CNN for feature extraction on short windows (1 second) with
+an LSTM layer to capture longer-term temporal dynamics. This addresses
+the high false alarm rate of the simple CNN by considering temporal context.
+
+Architecture:
+- Input: Accelerometer data stream at 25Hz
+- Short-window CNN: Processes 1-second chunks (25 samples @ 25Hz)
+  - Extracts feature vectors from each 1-second window
+- LSTM: Processes sequence of CNN feature vectors (30-60 seconds)
+  - Captures temporal patterns and dynamics
+- Dense classifier head for final prediction
+
+This model uses the same interface as deepEpiCnnModel_torch.py
+to work seamlessly with runSequence.py
+"""
+
+import sys
+import os
+import json
+import numpy as np
+import torch
+import torch.nn as nn
+
+sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..'))
+import libosd.dpTools
+
+try:
+    from user_tools.nnTraining2 import nnModel
+except Exception:
+    import nnModel
+
+
+class CnnFeatureExtractor(nn.Module):
+    """
+    1D CNN for feature extraction on short windows (1 second).
+    Outputs a feature vector from each 1-second accelerometer sample.
+    """
+    def __init__(self, window_samples=25, feature_dim=64, conv_dropout=0.0, input_channels=1):
+        """
+        Args:
+            window_samples: Number of samples in 1-second window (25 @ 25Hz)
+            feature_dim: Dimension of extracted feature vector
+            conv_dropout: Dropout probability after conv layers
+            input_channels: Number of accelerometer channels (1=magnitude, 3=xyz)
+        """
+        super(CnnFeatureExtractor, self).__init__()
+        
+        self.window_samples = window_samples
+        self.feature_dim = feature_dim
+        
+        # Compact CNN: 4 conv layers for 1-second windows
+        # Layer 1: (1, 25) -> (16, 22) with kernel=5, stride=1
+        self.conv1 = nn.Conv1d(input_channels, 16, kernel_size=5, stride=1, padding=0)
+        self.bn1 = nn.BatchNorm1d(16)
+        self.relu1 = nn.ReLU()
+        self.drop1 = nn.Dropout(conv_dropout) if conv_dropout > 0.0 else nn.Identity()
+        
+        # Layer 2: (16, 22) -> (32, 19) with kernel=5, stride=1
+        self.conv2 = nn.Conv1d(16, 32, kernel_size=5, stride=1, padding=0)
+        self.bn2 = nn.BatchNorm1d(32)
+        self.relu2 = nn.ReLU()
+        self.drop2 = nn.Dropout(conv_dropout) if conv_dropout > 0.0 else nn.Identity()
+        
+        # Layer 3: (32, 19) -> (32, 16) with kernel=5, stride=1
+        self.conv3 = nn.Conv1d(32, 32, kernel_size=5, stride=1, padding=0)
+        self.bn3 = nn.BatchNorm1d(32)
+        self.relu3 = nn.ReLU()
+        self.drop3 = nn.Dropout(conv_dropout) if conv_dropout > 0.0 else nn.Identity()
+        
+        # Layer 4: (32, 16) -> (64, 12) with kernel=5, stride=1
+        self.conv4 = nn.Conv1d(32, 64, kernel_size=5, stride=1, padding=0)
+        self.bn4 = nn.BatchNorm1d(64)
+        self.relu4 = nn.ReLU()
+        self.drop4 = nn.Dropout(conv_dropout) if conv_dropout > 0.0 else nn.Identity()
+        
+        # Global average pooling: (64, 12) -> (64,)
+        self.global_pool = nn.AdaptiveAvgPool1d(1)
+        
+        # Feature projection: 64 -> feature_dim
+        self.fc_feature = nn.Linear(64, feature_dim)
+    
+    def forward(self, x):
+        """
+        Extract features from 1-second acceleration window.
+        
+        Args:
+            x: Input tensor of shape (batch, 1, window_samples) or (batch, window_samples)
+        
+        Returns:
+            Feature tensor of shape (batch, feature_dim)
+        """
+        # Handle input shape
+        if x.dim() == 2:
+            x = x.unsqueeze(1)  # (batch, window_samples) -> (batch, 1, window_samples)
+        
+        # Convolutional layers
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = self.relu1(x)
+        x = self.drop1(x)
+        
+        x = self.conv2(x)
+        x = self.bn2(x)
+        x = self.relu2(x)
+        x = self.drop2(x)
+        
+        x = self.conv3(x)
+        x = self.bn3(x)
+        x = self.relu3(x)
+        x = self.drop3(x)
+        
+        x = self.conv4(x)
+        x = self.bn4(x)
+        x = self.relu4(x)
+        x = self.drop4(x)
+        
+        # Global average pooling: (batch, 64, T) -> (batch, 64)
+        x = self.global_pool(x)
+        x = x.squeeze(-1)
+        
+        # Project to feature dimension
+        x = self.fc_feature(x)
+        
+        return x
+
+
+class CnnLstm(nn.Module):
+    """
+    CNN-LSTM network for seizure detection.
+    Combines 1-second CNN feature extraction with LSTM for temporal modeling.
+    """
+    def __init__(self, window_samples=25, lstm_seq_length=30, feature_dim=64,
+                 lstm_hidden_dim=128, num_layers=2, num_classes=2, 
+                 conv_dropout=0.0, lstm_dropout=0.2, dense_dropout=0.025,
+                 input_channels=1):
+        """
+        Args:
+            window_samples: Samples in 1-second window (25 @ 25Hz)
+            lstm_seq_length: Number of 1-second features for LSTM (30 = 30 seconds)
+            feature_dim: CNN feature vector dimension
+            lstm_hidden_dim: LSTM hidden state dimension
+            num_layers: Number of LSTM layers
+            num_classes: Number of output classes
+            conv_dropout: Dropout after conv layers
+            lstm_dropout: Dropout in LSTM (between layers)
+            dense_dropout: Dropout in dense layers
+        """
+        super(CnnLstm, self).__init__()
+        
+        self.window_samples = window_samples
+        self.lstm_seq_length = lstm_seq_length
+        self.feature_dim = feature_dim
+        self.lstm_hidden_dim = lstm_hidden_dim
+        self.num_classes = num_classes
+        self.input_channels = input_channels
+        
+        # CNN feature extractor for 1-second windows
+        self.cnn_extractor = CnnFeatureExtractor(
+            window_samples=window_samples,
+            feature_dim=feature_dim,
+            conv_dropout=conv_dropout,
+            input_channels=input_channels,
+        )
+        
+        # LSTM to process sequence of CNN features
+        # Input: (batch, seq_length, feature_dim)
+        # Output: (batch, seq_length, lstm_hidden_dim)
+        self.lstm = nn.LSTM(
+            input_size=feature_dim,
+            hidden_size=lstm_hidden_dim,
+            num_layers=num_layers,
+            dropout=lstm_dropout if num_layers > 1 else 0.0,
+            batch_first=True
+        )
+        
+        # Dense classifier head on final LSTM output
+        # After LSTM: (batch, lstm_seq_length, lstm_hidden_dim)
+        # Take last timestep: (batch, lstm_hidden_dim)
+        self.fc1 = nn.Linear(lstm_hidden_dim, 128)
+        self.bn1 = nn.BatchNorm1d(128)
+        self.relu1 = nn.ReLU()
+        self.dropout1 = nn.Dropout(dense_dropout) if dense_dropout > 0.0 else nn.Identity()
+        
+        self.fc2 = nn.Linear(128, 64)
+        self.bn2 = nn.BatchNorm1d(64)
+        self.relu2 = nn.ReLU()
+        self.dropout2 = nn.Dropout(dense_dropout) if dense_dropout > 0.0 else nn.Identity()
+        
+        self.fc3 = nn.Linear(64, 32)
+        self.bn3 = nn.BatchNorm1d(32)
+        self.relu3 = nn.ReLU()
+        self.dropout3 = nn.Dropout(dense_dropout) if dense_dropout > 0.0 else nn.Identity()
+        
+        self.fc_out = nn.Linear(32, num_classes)
+    
+    def forward(self, x):
+        """
+        Forward pass through CNN-LSTM network.
+        
+        Args:
+            x: Input tensor - handles multiple input formats:
+               - (batch, 750): 2D array from nnTrainer
+               - (batch, 750, 1): 3D with trailing feature dimension
+               - (batch, 1, 750): 3D with middle dimension = 1
+               - (batch, 30, 25): Already properly shaped
+        
+        Returns:
+            Logits of shape (batch, num_classes)
+        """
+        expected_total = self.lstm_seq_length * self.window_samples
+
+        # Normalize to canonical shape: (batch, seq_len, window_samples, channels)
+        if x.dim() == 2:
+            batch_size, total_samples = x.shape
+            if total_samples != expected_total:
+                raise ValueError(f"Input 2D shape {x.shape}: expected second dim={expected_total}")
+            x = x.reshape(batch_size, self.lstm_seq_length, self.window_samples, 1)
+
+        elif x.dim() == 3:
+            batch_size, dim1, dim2 = x.shape
+            if dim1 == expected_total and dim2 == self.input_channels:
+                x = x.reshape(batch_size, self.lstm_seq_length, self.window_samples, self.input_channels)
+            elif dim1 == self.input_channels and dim2 == expected_total:
+                x = x.permute(0, 2, 1).contiguous().reshape(
+                    batch_size, self.lstm_seq_length, self.window_samples, self.input_channels
+                )
+            elif dim1 == expected_total and dim2 == 1 and self.input_channels == 1:
+                x = x.reshape(batch_size, self.lstm_seq_length, self.window_samples, 1)
+            elif dim1 == 1 and dim2 == expected_total and self.input_channels == 1:
+                x = x.squeeze(1).reshape(batch_size, self.lstm_seq_length, self.window_samples, 1)
+            elif dim1 == self.lstm_seq_length and dim2 == self.window_samples and self.input_channels == 1:
+                x = x.unsqueeze(-1)
+            else:
+                raise ValueError(
+                    f"Cannot interpret 3D input {x.shape} for input_channels={self.input_channels}"
+                )
+
+        elif x.dim() == 4:
+            _, d1, d2, d3 = x.shape
+            if d1 == self.lstm_seq_length and d2 == self.window_samples and d3 == self.input_channels:
+                pass
+            elif d1 == self.input_channels and d2 == self.lstm_seq_length and d3 == self.window_samples:
+                x = x.permute(0, 2, 3, 1).contiguous()
+            elif d1 == self.lstm_seq_length and d2 == self.input_channels and d3 == self.window_samples:
+                x = x.permute(0, 1, 3, 2).contiguous()
+            else:
+                raise ValueError(
+                    f"Cannot interpret 4D input {x.shape}; expected (batch, {self.lstm_seq_length}, {self.window_samples}, {self.input_channels})"
+                )
+
+        else:
+            raise ValueError(f"Input must be 2D/3D/4D, got {x.dim()}D with shape {x.shape}")
+
+        batch_size = x.shape[0]
+        seq_length = x.shape[1]
+        if seq_length != self.lstm_seq_length or x.shape[2] != self.window_samples or x.shape[3] != self.input_channels:
+            raise ValueError(
+                f"Shape mismatch: got {x.shape}, expected (batch, {self.lstm_seq_length}, {self.window_samples}, {self.input_channels})"
+            )
+
+        # Reshape for CNN: (batch*seq_len, channels, window_samples)
+        x_cnn = x.reshape(batch_size * seq_length, self.window_samples, self.input_channels).permute(0, 2, 1).contiguous()
+        
+        # Extract features for each window
+        features = self.cnn_extractor(x_cnn)  # (batch*seq_length, feature_dim)
+        
+        # Reshape back for LSTM: (batch, seq_length, feature_dim)
+        features = features.reshape(batch_size, seq_length, self.feature_dim)
+        
+        # LSTM processing of feature sequence
+        lstm_out, (h_n, c_n) = self.lstm(features)  # lstm_out: (batch, seq_length, lstm_hidden_dim)
+        
+        # Use last timestep output for classification
+        last_output = lstm_out[:, -1, :]  # (batch, lstm_hidden_dim)
+        
+        # Dense classifier head
+        x = self.fc1(last_output)
+        x = self.bn1(x)
+        x = self.relu1(x)
+        x = self.dropout1(x)
+        
+        x = self.fc2(x)
+        x = self.bn2(x)
+        x = self.relu2(x)
+        x = self.dropout2(x)
+        
+        x = self.fc3(x)
+        x = self.bn3(x)
+        x = self.relu3(x)
+        x = self.dropout3(x)
+        
+        # Output logits
+        x = self.fc_out(x)
+        
+        return x
+
+
+class CnnLstmModelPyTorch(nnModel.NnModel):
+    """
+    PyTorch wrapper implementing the nnModel interface for CNN-LSTM model.
+    Provides same interface as DeepEpiCnnModelPyTorch for compatibility with runSequence.py
+    """
+    def __init__(self, configObj=None, debug=False):
+        super().__init__(configObj, debug)
+        
+        # Sampling parameters
+        self.sampleFreq = 25.0
+        self.cnn_window_seconds = 1.0  # 1-second windows for CNN
+        self.lstm_window_seconds = 30.0  # 30 seconds of data for LSTM
+        
+        # Calculate buffer sizes
+        self.cnn_window_samples = int(self.sampleFreq * self.cnn_window_seconds)  # 25
+        self.lstm_seq_length = int(self.lstm_window_seconds * self.sampleFreq / self.cnn_window_samples)  # 30
+        self.bufferSamples = int(self.sampleFreq * self.lstm_window_seconds)  # 750
+        
+        # Feature and LSTM dimensions
+        self.feature_dim = 64
+        self.lstm_hidden_dim = 128
+        self.lstm_num_layers = 2
+        
+        # Dropout settings
+        self.conv_dropout = 0.0
+        self.lstm_dropout = 0.2
+        self.dense_dropout = 0.025
+
+        # Input mode settings
+        self.accel_input_mode = 'magnitude'
+        self.input_channels = 1
+        
+        if configObj is not None:
+            try:
+                if 'sampleFreq' in configObj:
+                    self.sampleFreq = float(configObj['sampleFreq'])
+                
+                if 'cnnWindowSeconds' in configObj:
+                    self.cnn_window_seconds = float(configObj['cnnWindowSeconds'])
+                
+                if 'lstmWindowSeconds' in configObj:
+                    self.lstm_window_seconds = float(configObj['lstmWindowSeconds'])
+                
+                # Recalculate based on config
+                self.cnn_window_samples = int(self.sampleFreq * self.cnn_window_seconds)
+                self.lstm_seq_length = int(self.lstm_window_seconds * self.sampleFreq / self.cnn_window_samples)
+                self.bufferSamples = int(self.sampleFreq * self.lstm_window_seconds)
+                
+                # Feature and LSTM dimensions
+                if 'featureDim' in configObj:
+                    self.feature_dim = int(configObj['featureDim'])
+                if 'lstmHiddenDim' in configObj:
+                    self.lstm_hidden_dim = int(configObj['lstmHiddenDim'])
+                if 'lstmNumLayers' in configObj:
+                    self.lstm_num_layers = int(configObj['lstmNumLayers'])
+                
+                # Dropout settings
+                self.conv_dropout = float(configObj.get('convDropout', self.conv_dropout))
+                self.lstm_dropout = float(configObj.get('lstmDropout', self.lstm_dropout))
+                self.dense_dropout = float(configObj.get('denseDropout', self.dense_dropout))
+
+                self.accel_input_mode = str(configObj.get('accelInputMode', self.accel_input_mode)).lower()
+                self.input_channels = int(configObj.get('inputChannels', self.input_channels))
+                if self.accel_input_mode == 'xyz' and self.input_channels == 1:
+                    self.input_channels = 3
+            except Exception as e:
+                if debug:
+                    print(f"Error parsing config: {e}, using defaults")
+                # Use defaults
+                self.cnn_window_samples = 25
+                self.lstm_seq_length = 30
+                self.bufferSamples = 750
+        
+        # Internal acc buffer - Phase 2: keep list for now but add numpy fast path
+        # Buffer size flexible via bufferSamples (750 for 30s, 1125 for 45s, etc.)
+        self.accBuf = []
+        self.accBuf3D = []
+        # Numpy circular buffers for fast path (initialized lazily)
+        self._buf = None
+        self._buf3d = None
+        self._buf_len = 0
+        self._buf_pos = 0
+        self._buf3d_len = 0
+        self._buf3d_pos = 0
+        self.model = None
+        
+        # Device selection
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        if debug:
+            print(f"CnnLstmModelPyTorch: Using device {self.device}")
+            print(f"  CNN window: {self.cnn_window_seconds}s ({self.cnn_window_samples} samples)")
+            print(f"  LSTM sequence: {self.lstm_window_seconds}s ({self.lstm_seq_length} timesteps)")
+            print(f"  Total buffer: {self.bufferSamples} samples")
+            print(f"  Feature dim: {self.feature_dim}, LSTM hidden dim: {self.lstm_hidden_dim}")
+            print(f"  Input mode: {self.accel_input_mode}, channels={self.input_channels}")
+    
+    def makeModel(self, input_shape=None, num_classes=2, nLayers=None):
+        """
+        Build the CNN-LSTM model.
+        
+        Args:
+            input_shape: Expected (bufferSamples, 1) from TensorFlow convention
+            num_classes: Number of output classes
+            nLayers: Ignored (architecture is fixed)
+        
+        Returns:
+            PyTorch nn.Module
+        """
+        self.model = CnnLstm(
+            window_samples=self.cnn_window_samples,
+            lstm_seq_length=self.lstm_seq_length,
+            feature_dim=self.feature_dim,
+            lstm_hidden_dim=self.lstm_hidden_dim,
+            num_layers=self.lstm_num_layers,
+            num_classes=num_classes,
+            conv_dropout=self.conv_dropout,
+            lstm_dropout=self.lstm_dropout,
+            dense_dropout=self.dense_dropout,
+            input_channels=self.input_channels,
+        )
+        
+        # Move to device
+        self.model = self.model.to(self.device)
+        
+        if self.debug:
+            print(f"Created CnnLstm with:")
+            print(f"  Input shape: ({self.bufferSamples}, {self.input_channels})")
+            print(f"  CNN window: {self.cnn_window_samples} samples")
+            print(f"  LSTM seq length: {self.lstm_seq_length}")
+            print(f"  Feature dim: {self.feature_dim}")
+            print(f"  LSTM hidden dim: {self.lstm_hidden_dim}")
+            print(f"  LSTM layers: {self.lstm_num_layers}")
+            print(f"  Num classes: {num_classes}")
+            print(f"  Model parameters: {sum(p.numel() for p in self.model.parameters())}")
+        
+        return self.model
+    
+    def export_example_inputs(self, batch_size=1):
+        """Example inputs for torch.export / ExecuTorch tracing.
+
+        Returns (batch, channels, total_samples) with
+        total = lstm_seq_length * cnn_window_samples, matching both the
+        geometry this wrapper was configured with and the layout the .pte
+        runtime is fed at inference time. CnnLstm.forward accepts this
+        channels-first layout directly.
+        """
+        total = int(self.lstm_seq_length * self.cnn_window_samples)
+        channels = int(self.input_channels)
+        return (torch.randn(int(batch_size), channels, total,
+                            dtype=torch.float32),)
+
+    def appendToAccBuf(self, accData):
+        """Append acceleration data to buffer (flexible window via bufferSamples).
+
+        Missing samples (None/NaN/inf) are dropped so the next valid sample
+        concatenates onto the buffer, matching the production device (which
+        ignores missing data).  They are never zero-filled: 0 mg is
+        non-physical for a resting (~1000 mg) sensor.
+        """
+        # Accept list or np array; use Python list for now (750-1125 len, ~21KB)
+        # Keeping list maintains backward compat; Phase 2b can switch to circular np buffer
+        self.accBuf.extend(nnModel.valid_accel_samples_1d(accData))
+        if len(self.accBuf) > self.bufferSamples:
+            self.accBuf = self.accBuf[-self.bufferSamples:]
+
+    def appendToAccBuf3D(self, accData3D):
+        """Append 3D acceleration samples to buffer (flexible window).
+
+        Sample triplets with any missing axis are dropped (see appendToAccBuf).
+        """
+        self.accBuf3D.extend(nnModel.valid_accel_samples_3d(accData3D))
+        if len(self.accBuf3D) > self.bufferSamples:
+            self.accBuf3D = self.accBuf3D[-self.bufferSamples:]
+    
+    def resetAccBuf(self):
+        """Reset acceleration buffer."""
+        self.accBuf = []
+        self.accBuf3D = []
+        # Reset numpy fast buffers if used
+        if self._buf is not None:
+            self._buf_len = 0
+            self._buf_pos = 0
+        if self._buf3d is not None:
+            self._buf3d_len = 0
+            self._buf3d_pos = 0
+    
+    def prefillAccBuf(self, mode='repeat', ref=None, rng=None):
+        """Pre-fill the rolling buffer so that the first datapoint of a buffer
+        segment yields a vector instead of None (see NnModel.prefillAccBuf).
+        Handles both accel_input_mode='magnitude' and 'xyz'.
+
+        For 'repeat'/'noise', ref should be the first real datapoint's samples:
+        a 1D magnitude array, or an (n, 3) / interleaved 1D array for xyz.
+        """
+        import numpy as _np
+        nBuf = int(getattr(self, 'bufferSamples', 0) or 0)
+        if nBuf <= 0:
+            return False
+        mode = str(mode).lower() if mode is not None else 'repeat'
+        if mode in ('stationary', 'static') or ref is None:
+            if mode not in ('stationary', 'static', 'repeat', 'noise'):
+                return False
+            # Legacy flat fill (or fallback when no reference is available).
+            if self.accel_input_mode == 'xyz':
+                # Stationary: gravity on the Z axis (no XYZ test data available to
+                # confirm the device axis convention - change here if needed).
+                self.accBuf3D = [[0.0, 0.0, self._stationary_fill_value()]] * nBuf
+            else:
+                self.accBuf = [self._stationary_fill_value()] * nBuf
+            return True
+        if self.accel_input_mode == 'xyz':
+            arr = _np.asarray(ref, dtype=float)
+            if arr.ndim == 1:
+                if arr.size % 3 != 0 or arr.size == 0:
+                    return False
+                arr = arr.reshape(-1, 3)
+            elif arr.ndim != 2 or arr.shape[1] != 3 or arr.shape[0] == 0:
+                return False
+            arr = arr[~_np.isnan(arr).any(axis=1)]
+            if arr.shape[0] == 0:
+                return False
+            if mode == 'repeat':
+                tiled = _np.tile(arr, (int(_np.ceil(nBuf / float(arr.shape[0]))), 1))[:nBuf]
+                self.accBuf3D = tiled.tolist()
+                return True
+            if mode == 'noise':
+                mu = arr.mean(axis=0)
+                sd = arr.std(axis=0)
+                sd[~_np.isfinite(sd) | (sd <= 0)] = 5.0
+                if rng is None:
+                    rng = _np.random.default_rng()
+                elif not hasattr(rng, 'normal'):
+                    rng = _np.random.default_rng(int(rng))
+                try:
+                    fill = rng.normal(mu, sd, (nBuf, 3))
+                except Exception:
+                    return False
+                self.accBuf3D = fill.tolist()
+                return True
+            return False
+        # magnitude mode: delegate to the base-class implementation which fills
+        # self.accBuf from a 1D reference.
+        return super().prefillAccBuf(mode=mode, ref=ref, rng=rng)
+    
+    def accData2vector(self, accData, normalise=False):
+        """
+        Convert acceleration data to input vector by accumulating in buffer.
+        Returns vector only when sufficient data accumulated (bufferSamples).
+        Flexible window: uses self.bufferSamples (750 for 30s, 1125 for 45s).
+        Phase 2: returns np.ndarray float32 (not list) to halve outLst RAM.
+        """
+        self.appendToAccBuf(accData)
+        if len(self.accBuf) < self.bufferSamples:
+            return None
+        vec = np.array(self.accBuf[-self.bufferSamples:], dtype=np.float32) / 1000.0
+        if normalise:
+            std = vec.std()
+            if std != 0:
+                vec = (vec - vec.mean()) / std
+            else:
+                vec = vec - vec.mean()
+        return vec
+
+    def accData3D2vector(self, accData3D, normalise=False):
+        """Convert 3D acceleration data to [bufferSamples, 3] input vector (flexible window)."""
+        self.appendToAccBuf3D(accData3D)
+        if len(self.accBuf3D) < self.bufferSamples:
+            return None
+        vec = np.array(self.accBuf3D[-self.bufferSamples:], dtype=np.float32) / 1000.0
+        if normalise:
+            for ch in range(vec.shape[1]):
+                ch_std = vec[:, ch].std()
+                if ch_std != 0:
+                    vec[:, ch] = (vec[:, ch] - vec[:, ch].mean()) / ch_std
+                else:
+                    vec[:, ch] = vec[:, ch] - vec[:, ch].mean()
+        return vec
+    
+    def dp2vector(self, dpObj, normalise=False):
+        """
+        Convert datapoint to input vector.
+        
+        Args:
+            dpObj: Datapoint dict or raw data string
+            normalise: Whether to normalize
+        
+        Returns:
+            Vector representation suitable for model input
+        """
+        if isinstance(dpObj, dict):
+            if self.accel_input_mode == 'xyz':
+                raw3d = dpObj.get('rawData3D', None)
+                if raw3d is None:
+                    return None
+                return self.accData3D2vector(raw3d, normalise)
+
+            raw = dpObj.get('rawData', None)
+            if raw is None:
+                return None
+            return self.accData2vector(raw, normalise)
+
+        rawDataStr = dpObj
+        if self.accel_input_mode == 'xyz':
+            try:
+                jsonObj = json.loads(rawDataStr)
+                accData3D = jsonObj.get('data3D', None)
+            except Exception:
+                accData3D = None
+            if accData3D is None:
+                return None
+            return self.accData3D2vector(accData3D, normalise)
+
+        accData, _ = libosd.dpTools.getAccelDataFromJson(rawDataStr)
+        if accData is None:
+            return None
+
+        return self.accData2vector(accData, normalise)
+    
+    def predict(self, x):
+        """
+        Run inference on input data.
+        
+        Args:
+            x: Input data (numpy array or torch tensor) of shape (batch, bufferSamples)
+               or (batch, 1, bufferSamples)
+        
+        Returns:
+            Predictions as numpy array of shape (batch, num_classes)
+        """
+        self.model.eval()
+        with torch.no_grad():
+            if not isinstance(x, torch.Tensor):
+                x = torch.from_numpy(x).float()
+            x = x.to(self.device)
+            
+            output = self.model(x)
+            # Apply softmax to get probabilities
+            probs = torch.softmax(output, dim=1)
+            
+            return probs.cpu().numpy()
+    
+    @staticmethod
+    def harrell_davis_quantile(sample, q=0.7):
+        """
+        Compute Harrell–Davis quantile estimate for a 1D array of sample model scores.
+        
+        This is a static method shared with the TensorFlow implementation.
+        
+        Args:
+            sample: 1D iterable of numeric values (e.g. model scores from ensemble)
+            q: quantile in (0,1)
+        
+        Returns:
+            Weighted sum of order statistics.
+        """
+        try:
+            from scipy.special import betainc
+        except ImportError:
+            raise ImportError("scipy is required for Harrell–Davis quantile. Please install scipy.")
+        
+        sample = np.asarray(sample, dtype=float)
+        sample = sample[~np.isnan(sample)]
+        
+        n = len(sample)
+        if n < 1:
+            return np.nan
+        
+        sample_sorted = np.sort(sample)
+        
+        alpha = q * (n + 1)
+        beta = (1 - q) * (n + 1)
+        
+        # Compute weights for each order statistic
+        weights = np.zeros(n)
+        for j in range(n):
+            cdf_j = betainc(alpha, beta, (j + 1) / (n + 1))
+            cdf_j_minus_1 = betainc(alpha, beta, j / (n + 1)) if j > 0 else 0
+            weights[j] = cdf_j - cdf_j_minus_1
+        
+        return np.dot(weights, sample_sorted)
+
+
+def main():
+    """
+    Testing script for CNN-LSTM model.
+    """
+    print("CnnLstmModel testing...")
+    
+    # Create test configuration
+    configObj = {
+        "sampleFreq": 25,
+        "cnnWindowSeconds": 1.0,
+        "lstmWindowSeconds": 30.0,
+        "featureDim": 64,
+        "lstmHiddenDim": 128,
+        "lstmNumLayers": 2,
+        "convDropout": 0.0,
+        "lstmDropout": 0.2,
+        "denseDropout": 0.025
+    }
+    
+    model = CnnLstmModelPyTorch(configObj, debug=True)
+    model.makeModel(num_classes=2)
+    
+    # Test with random data
+    batch_size = 4
+    test_data = np.random.randn(batch_size, 1, 750).astype(np.float32)
+    
+    print("\nTesting model prediction...")
+    predictions = model.predict(test_data)
+    print(f"Predictions shape: {predictions.shape}")
+    print(f"Predictions:\n{predictions}")
+    
+    print("\nModel testing complete!")
+
+
+if __name__ == "__main__":
+    main()

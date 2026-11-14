@@ -1,0 +1,22 @@
+{
+  "locked_rule": {
+    "power_threshold": 0.05425036036486526,
+    "ratio_threshold": 0.436484300104836,
+    "required_consecutive": 2
+  },
+  "test_metrics": {
+    "events": 7,
+    "positive_events": 3,
+    "negative_events": 4,
+    "tp": 3,
+    "tn": 3,
+    "fp": 1,
+    "fn": 0,
+    "sensitivity": 1.0,
+    "specificity": 0.75,
+    "fpr": 0.25,
+    "precision": 0.75,
+    "balanced_accuracy": 0.875,
+    "median_alarm_time_s": 55.0
+  }
+}
