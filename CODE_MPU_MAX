@@ -1,0 +1,690 @@
+/*
+  ESP32 + MPU6050 + MAX30102 — salida unificada Plotter + Monitor
+  =========================================================
+
+  Objetivo:
+  - Muestrear MPU6050 a 25 Hz.
+  - Formar ventanas NO solapadas de 5 s = 125 muestras.
+  - Calcular magnitud de aceleración en g.
+  - Eliminar DC, aplicar Hann periódica igual a scipy.signal.get_window("hann", 125, fftbins=True).
+  - Calcular DFT directamente para reproducir la escala usada en Python.
+  - power_3_8 = suma de potencia FFT entre 3.0 y <8.0 Hz.
+  - ratio_3_8 = power_3_8 / potencia total entre 0.2 y 12.4 Hz.
+  - Ventana positiva si:
+        power_3_8 >= 0.05425036036486526
+        AND
+        ratio_3_8 >= 0.436484300104836
+  - WARNING si hay 2 ventanas positivas consecutivas.
+
+  IMPORTANTE:
+  - Estos parámetros están CONGELADOS tras TRAIN/VALIDATION/TEST OSDB nocturno.
+  - No reajustarlos con el TEST ya abierto.
+  - Es detector de movimiento sospechoso, NO diagnóstico clínico.
+  - MAX30102 muestra BPM/SpO2 en Serial Monitor; NO interviene en warning.
+  - EEG se agregará después como corroboración.
+
+  Cableado ESP32 actual:
+  MPU6050 VCC -> 3V3
+  MPU6050 GND -> GND
+  MPU6050 SDA -> GPIO4 / D4
+  MPU6050 SCL -> GPIO5 / D5
+  AD0 -> GND (dirección 0x68)
+*/
+
+#include <Wire.h>
+#include <math.h>
+#include "MAX30105.h"
+#include "spo2_algorithm.h"
+
+// -------------------- I2C / MPU6050 --------------------
+static const uint8_t MPU_ADDR = 0x68;
+static const int SDA_PIN = 4;
+static const int SCL_PIN = 5;
+
+// -------------------- MAX30102 --------------------
+// Comparte SDA/SCL con el MPU6050.
+// Dirección I2C habitual del MAX30102: 0x57.
+MAX30105 max30102;
+bool max30102Connected = false;
+
+// Configuración coherente con las pruebas previas:
+// 100 Hz internos / promedio 4 ≈ 25 muestras/s efectivas.
+static const byte MAX_LED_BRIGHTNESS = 50;
+static const byte MAX_SAMPLE_AVERAGE = 4;
+static const byte MAX_LED_MODE = 2;      // RED + IR
+static const int MAX_SAMPLE_RATE = 100;
+static const int MAX_PULSE_WIDTH = 411;
+static const int MAX_ADC_RANGE = 4096;
+
+// Ventana de 100 muestras efectivas ≈ 4 s para HR/SpO2.
+static const int PPG_BUFFER_SIZE = 100;
+static const int PPG_RECALC_STEP = 25;
+
+uint32_t ppgIRRing[PPG_BUFFER_SIZE];
+uint32_t ppgRedRing[PPG_BUFFER_SIZE];
+int ppgRingHead = 0;
+int ppgSamplesStored = 0;
+int ppgSamplesSinceCalc = 0;
+
+uint32_t ppgIRWork[PPG_BUFFER_SIZE];
+uint32_t ppgRedWork[PPG_BUFFER_SIZE];
+
+int32_t latestHeartRate = 0;
+int32_t latestSpO2 = 0;
+int8_t latestHeartRateValid = 0;
+int8_t latestSpO2Valid = 0;
+uint32_t latestIR = 0;
+uint32_t latestRed = 0;
+
+// -------------------- Muestreo --------------------
+static const int FS_HZ = 25;
+static const int N = 125;
+static const uint32_t SAMPLE_PERIOD_US = 40000UL;  // 25 Hz
+
+// -------------------- Calibración MPU6050 --------------------
+// Valores obtenidos previamente para este sensor.
+static const float ACCEL_BIAS_X_RAW = 115.476f;
+static const float ACCEL_BIAS_Y_RAW = -79.120f;
+static const float ACCEL_BIAS_Z_RAW = 163.600f;
+
+static const float ACCEL_SCALE_X_LSB_PER_G = 4083.604f;
+static const float ACCEL_SCALE_Y_LSB_PER_G = 4115.592f;
+static const float ACCEL_SCALE_Z_LSB_PER_G = 4162.744f;
+
+// -------------------- Regla congelada --------------------
+static const double POWER_THRESHOLD = 0.05425036036486526;
+static const double RATIO_THRESHOLD = 0.436484300104836;
+static const int REQUIRED_CONSECUTIVE = 2;
+
+// -------------------- Buffer --------------------
+float accMagG[N];
+int sampleIndex = 0;
+uint32_t nextSampleUs = 0;
+
+// -------------------- Estado --------------------
+int consecutivePositiveWindows = 0;
+unsigned long windowCounter = 0;
+
+// Si más adelante deseas LED, cambia a 1 y define el pin adecuado.
+#define USE_WARNING_LED 0
+#if USE_WARNING_LED
+static const int WARNING_LED_PIN = 2;
+#endif
+
+// -------------------- Salida Serial unificada --------------------
+// La MISMA línea sirve para Arduino Serial Plotter y Serial Monitor.
+// El Plotter verá todas las variables; para una presentación puedes
+// desmarcar BPM, SpO2 y PPGvalid y dejar solo las del MPU.
+#define SERIAL_PLOTTER_MODE 1
+
+// Variables calculadas en la última ventana completa.
+// Se repiten en el Plotter durante los siguientes 5 s para poder verlas.
+double lastPower3to8 = 0.0;
+double lastRatio3to8 = 0.0;
+bool lastWindowPositive = false;
+bool lastWarning = false;
+
+// Para que power_3_8 no destruya la escala del gráfico cuando crece mucho,
+// se grafica también en escala logarítmica:
+// logPower = log10(1 + power_3_8)
+static const double LOG_POWER_THRESHOLD =
+  log10(1.0 + POWER_THRESHOLD);
+
+
+// ============================================================
+// MPU6050
+// ============================================================
+
+void writeMPU(uint8_t reg, uint8_t value) {
+  Wire.beginTransmission(MPU_ADDR);
+  Wire.write(reg);
+  Wire.write(value);
+  uint8_t status = Wire.endTransmission();
+
+  if (status != 0) {
+#if !SERIAL_PLOTTER_MODE
+    Serial.print("ERROR_I2C_WRITE reg=0x");
+    Serial.print(reg, HEX);
+    Serial.print(" status=");
+    Serial.println(status);
+#endif
+  }
+}
+
+
+bool readAccelRaw(int16_t &ax, int16_t &ay, int16_t &az) {
+  // ACCEL_XOUT_H = 0x3B
+  Wire.beginTransmission(MPU_ADDR);
+  Wire.write(0x3B);
+
+  if (Wire.endTransmission(false) != 0) {
+    return false;
+  }
+
+  const uint8_t requested = 6;
+  uint8_t received = Wire.requestFrom(
+    (uint8_t)MPU_ADDR,
+    requested,
+    (uint8_t)true
+  );
+
+  if (received != requested) {
+    return false;
+  }
+
+  ax = (int16_t)((Wire.read() << 8) | Wire.read());
+  ay = (int16_t)((Wire.read() << 8) | Wire.read());
+  az = (int16_t)((Wire.read() << 8) | Wire.read());
+
+  return true;
+}
+
+
+void configureMPU6050() {
+  // Despertar y usar PLL X gyro como reloj.
+  writeMPU(0x6B, 0x01);
+  delay(100);
+
+  // CONFIG / DLPF_CFG = 5 ~ 10 Hz.
+  writeMPU(0x1A, 0x05);
+
+  // Gyro ±1000 dps (aunque este algoritmo no lo usa).
+  writeMPU(0x1B, 0x10);
+
+  // Accelerometer ±8 g.
+  writeMPU(0x1C, 0x10);
+
+  // Con DLPF activo: base 1 kHz.
+  // Fs interno = 1000 / (1 + 39) = 25 Hz.
+  writeMPU(0x19, 39);
+
+  delay(100);
+}
+
+
+// ============================================================
+// MAX30102 — lectura HR / SpO2 (NO interviene en el algoritmo MPU)
+// ============================================================
+
+void configureMAX30102() {
+  // Wire ya fue iniciado en GPIO4/GPIO5.
+  max30102Connected = max30102.begin(
+    Wire,
+    I2C_SPEED_STANDARD
+  );
+
+  if (!max30102Connected) {
+    // El detector MPU continúa funcionando aunque el MAX no responda.
+    latestHeartRateValid = 0;
+    latestSpO2Valid = 0;
+    return;
+  }
+
+  max30102.setup(
+    MAX_LED_BRIGHTNESS,
+    MAX_SAMPLE_AVERAGE,
+    MAX_LED_MODE,
+    MAX_SAMPLE_RATE,
+    MAX_PULSE_WIDTH,
+    MAX_ADC_RANGE
+  );
+
+  // RED e IR activos; GREEN apagado.
+  max30102.setPulseAmplitudeRed(MAX_LED_BRIGHTNESS);
+  max30102.setPulseAmplitudeIR(MAX_LED_BRIGHTNESS);
+  max30102.setPulseAmplitudeGreen(0);
+}
+
+
+void calculatePPGVitals() {
+  if (ppgSamplesStored < PPG_BUFFER_SIZE) {
+    return;
+  }
+
+  // Copiar el ring buffer en orden cronológico.
+  // ppgRingHead apunta a la próxima posición a escribir,
+  // por lo que también marca la muestra más antigua cuando está lleno.
+  for (int i = 0; i < PPG_BUFFER_SIZE; i++) {
+    int sourceIndex =
+      (ppgRingHead + i) % PPG_BUFFER_SIZE;
+
+    ppgIRWork[i] = ppgIRRing[sourceIndex];
+    ppgRedWork[i] = ppgRedRing[sourceIndex];
+  }
+
+  int32_t spo2 = 0;
+  int8_t validSpO2 = 0;
+  int32_t heartRate = 0;
+  int8_t validHeartRate = 0;
+
+  maxim_heart_rate_and_oxygen_saturation(
+    ppgIRWork,
+    PPG_BUFFER_SIZE,
+    ppgRedWork,
+    &spo2,
+    &validSpO2,
+    &heartRate,
+    &validHeartRate
+  );
+
+  latestHeartRate = heartRate;
+  latestSpO2 = spo2;
+  latestHeartRateValid = validHeartRate;
+  latestSpO2Valid = validSpO2;
+}
+
+
+void serviceMAX30102() {
+  if (!max30102Connected) {
+    return;
+  }
+
+  // Mueve datos del sensor al FIFO de la librería sin bloquear.
+  max30102.check();
+
+  while (max30102.available()) {
+    latestRed = max30102.getRed();
+    latestIR = max30102.getIR();
+
+    ppgRedRing[ppgRingHead] = latestRed;
+    ppgIRRing[ppgRingHead] = latestIR;
+
+    ppgRingHead =
+      (ppgRingHead + 1) % PPG_BUFFER_SIZE;
+
+    if (ppgSamplesStored < PPG_BUFFER_SIZE) {
+      ppgSamplesStored++;
+    }
+
+    ppgSamplesSinceCalc++;
+
+    max30102.nextSample();
+
+    // Una vez lleno, recalcular aproximadamente cada 1 s
+    // (25 muestras efectivas).
+    if (
+      ppgSamplesStored >= PPG_BUFFER_SIZE
+      && ppgSamplesSinceCalc >= PPG_RECALC_STEP
+    ) {
+      ppgSamplesSinceCalc = 0;
+      calculatePPGVitals();
+    }
+  }
+}
+
+
+// ============================================================
+// Características exactamente compatibles con Python
+// ============================================================
+
+void calculateOSDFeatures(
+  const float *x,
+  double &power3to8,
+  double &ratio3to8,
+  double &totalPower
+) {
+  // 1) Media.
+  double mean = 0.0;
+
+  for (int n = 0; n < N; n++) {
+    mean += (double)x[n];
+  }
+
+  mean /= (double)N;
+
+  // 2) Señal dinámica + Hann periódica.
+  // scipy.signal.get_window("hann", N, fftbins=True):
+  // w[n] = 0.5 - 0.5*cos(2*pi*n/N)
+  static double windowed[N];
+
+  for (int n = 0; n < N; n++) {
+    double hann =
+      0.5
+      - 0.5 * cos(
+          2.0 * M_PI * (double)n / (double)N
+        );
+
+    double dynamic =
+      (double)x[n] - mean;
+
+    windowed[n] =
+      dynamic * hann;
+  }
+
+  power3to8 = 0.0;
+  totalPower = 0.0;
+
+  // N=125 es impar.
+  // rFFT contiene k=0..62.
+  // df = Fs/N = 25/125 = 0.2 Hz.
+  //
+  // Total Python:
+  // 0.2 <= f < 12.5 + 1e-9
+  // => k=1..62 (0.2..12.4 Hz)
+  //
+  // Banda 3–8 Hz:
+  // 3.0 <= f < 8.0
+  // => k=15..39 (3.0..7.8 Hz)
+  for (int k = 1; k <= 62; k++) {
+    double realPart = 0.0;
+    double imagPart = 0.0;
+
+    for (int n = 0; n < N; n++) {
+      double angle =
+        2.0
+        * M_PI
+        * (double)k
+        * (double)n
+        / (double)N;
+
+      realPart +=
+        windowed[n] * cos(angle);
+
+      imagPart -=
+        windowed[n] * sin(angle);
+    }
+
+    double power =
+      realPart * realPart
+      + imagPart * imagPart;
+
+    totalPower += power;
+
+    if (k >= 15 && k <= 39) {
+      power3to8 += power;
+    }
+  }
+
+  ratio3to8 =
+    power3to8
+    / (totalPower + 1e-12);
+}
+
+
+// ============================================================
+// Salida compatible con Serial Plotter
+// ============================================================
+
+void printPlotterSample(
+  float axG,
+  float ayG,
+  float azG,
+  float magnitudeG
+) {
+  // Una única línea compatible con:
+  // - Arduino Serial Plotter
+  // - Arduino Serial Monitor
+  //
+  // En el Plotter puedes desmarcar BPM/SpO2/PPGvalid para que
+  // no alteren la escala visual del MPU.
+
+  Serial.print("accMag_g:");
+  Serial.print(magnitudeG, 5);
+  Serial.print("\t");
+
+  Serial.print("ratio3_8:");
+  Serial.print(lastRatio3to8, 5);
+  Serial.print("\t");
+
+  Serial.print("ratioThr:");
+  Serial.print(RATIO_THRESHOLD, 5);
+  Serial.print("\t");
+
+  Serial.print("logPower3_8:");
+  Serial.print(log10(1.0 + lastPower3to8), 5);
+  Serial.print("\t");
+
+  Serial.print("logPowerThr:");
+  Serial.print(LOG_POWER_THRESHOLD, 5);
+  Serial.print("\t");
+
+  Serial.print("warning:");
+  Serial.print(lastWarning ? 1 : 0);
+  Serial.print("\t");
+
+  // MAX30102: solo lectura, NO modifica warning.
+  Serial.print("BPM:");
+  if (latestHeartRateValid) {
+    Serial.print(latestHeartRate);
+  } else {
+    Serial.print(0);
+  }
+  Serial.print("\t");
+
+  Serial.print("SpO2:");
+  if (latestSpO2Valid) {
+    Serial.print(latestSpO2);
+  } else {
+    Serial.print(0);
+  }
+  Serial.print("\t");
+
+  Serial.print("PPGvalid:");
+  Serial.println(
+    (latestHeartRateValid && latestSpO2Valid) ? 1 : 0
+  );
+}
+
+
+
+
+// ============================================================
+// Procesar ventana
+// ============================================================
+
+void processWindow() {
+  double power3to8 = 0.0;
+  double ratio3to8 = 0.0;
+  double totalPower = 0.0;
+
+  calculateOSDFeatures(
+    accMagG,
+    power3to8,
+    ratio3to8,
+    totalPower
+  );
+
+  bool powerPass =
+    power3to8 >= POWER_THRESHOLD;
+
+  bool ratioPass =
+    ratio3to8 >= RATIO_THRESHOLD;
+
+  bool windowPositive =
+    powerPass && ratioPass;
+
+  if (windowPositive) {
+    consecutivePositiveWindows++;
+  } else {
+    consecutivePositiveWindows = 0;
+  }
+
+  bool warning =
+    consecutivePositiveWindows
+    >= REQUIRED_CONSECUTIVE;
+
+  // Guardar la última decisión para representarla continuamente
+  // en el Serial Plotter.
+  lastPower3to8 = power3to8;
+  lastRatio3to8 = ratio3to8;
+  lastWindowPositive = windowPositive;
+  lastWarning = warning;
+
+#if USE_WARNING_LED
+  digitalWrite(
+    WARNING_LED_PIN,
+    warning ? HIGH : LOW
+  );
+#endif
+
+  windowCounter++;
+
+#if !SERIAL_PLOTTER_MODE
+  // Salida de texto/CSV para Monitor Serial.
+  Serial.print("WINDOW,");
+  Serial.print(windowCounter);
+  Serial.print(",power_3_8,");
+  Serial.print(power3to8, 8);
+  Serial.print(",ratio_3_8,");
+  Serial.print(ratio3to8, 8);
+  Serial.print(",positive,");
+  Serial.print(windowPositive ? 1 : 0);
+  Serial.print(",consecutive,");
+  Serial.print(consecutivePositiveWindows);
+  Serial.print(",warning,");
+  Serial.println(warning ? 1 : 0);
+
+  if (
+    consecutivePositiveWindows
+    == REQUIRED_CONSECUTIVE
+  ) {
+    Serial.println(
+      ">>> WARNING: MOVIMIENTO NOCTURNO COMPATIBLE CON CRISIS <<<"
+    );
+  }
+#endif
+}
+
+
+// ============================================================
+// SETUP / LOOP
+// ============================================================
+
+void setup() {
+  Serial.begin(115200);
+  delay(500);
+
+#if USE_WARNING_LED
+  pinMode(WARNING_LED_PIN, OUTPUT);
+  digitalWrite(WARNING_LED_PIN, LOW);
+#endif
+
+  Wire.begin(
+    SDA_PIN,
+    SCL_PIN,
+    100000
+  );
+
+  configureMPU6050();
+
+  // MAX30102 comparte el mismo bus I2C.
+  configureMAX30102();
+
+#if !SERIAL_PLOTTER_MODE
+  Serial.println(
+    "ESP32_MPU6050_OSD_NOCTURNO_FIJO"
+  );
+
+  Serial.println(
+    "Regla congelada: power_3_8>=0.05425036, "
+    "ratio_3_8>=0.43648430, k=2"
+  );
+
+  Serial.println(
+    "Salida: WINDOW,n,power_3_8,val,ratio_3_8,val,"
+    "positive,0/1,consecutive,n,warning,0/1"
+  );
+
+  Serial.print("MAX30102: ");
+  Serial.println(
+    max30102Connected ? "CONECTADO" : "NO DETECTADO"
+  );
+
+  Serial.println(
+    "PPG se mostrara cada 1 s como: BPM, SpO2, validez, IR y RED."
+  );
+#endif
+
+  nextSampleUs =
+    micros();
+}
+
+
+void loop() {
+  // Mantener drenado el FIFO del MAX30102 continuamente.
+  // Esto NO modifica la lógica del detector MPU.
+  serviceMAX30102();
+
+  uint32_t now = micros();
+
+  // Comparación robusta ante overflow de micros().
+  if (
+    (int32_t)(
+      now - nextSampleUs
+    ) < 0
+  ) {
+    return;
+  }
+
+  nextSampleUs +=
+    SAMPLE_PERIOD_US;
+
+  int16_t axRaw, ayRaw, azRaw;
+
+  if (
+    !readAccelRaw(
+      axRaw,
+      ayRaw,
+      azRaw
+    )
+  ) {
+#if !SERIAL_PLOTTER_MODE
+    Serial.println(
+      "ERROR_I2C_READ"
+    );
+#endif
+
+    // No insertar muestra inválida.
+    return;
+  }
+
+  float axG =
+    (
+      (float)axRaw
+      - ACCEL_BIAS_X_RAW
+    )
+    / ACCEL_SCALE_X_LSB_PER_G;
+
+  float ayG =
+    (
+      (float)ayRaw
+      - ACCEL_BIAS_Y_RAW
+    )
+    / ACCEL_SCALE_Y_LSB_PER_G;
+
+  float azG =
+    (
+      (float)azRaw
+      - ACCEL_BIAS_Z_RAW
+    )
+    / ACCEL_SCALE_Z_LSB_PER_G;
+
+  float magnitudeG =
+    sqrtf(
+      axG * axG
+      + ayG * ayG
+      + azG * azG
+    );
+
+  accMagG[
+    sampleIndex
+  ] = magnitudeG;
+
+  // Una línea por muestra (25 líneas/s) para Serial Plotter.
+  // Las features FFT se actualizan solo al cerrar cada ventana de 5 s.
+  printPlotterSample(
+    axG,
+    ayG,
+    azG,
+    magnitudeG
+  );
+
+  sampleIndex++;
+
+  if (
+    sampleIndex >= N
+  ) {
+    processWindow();
+    sampleIndex = 0;
+  }
+}
