@@ -1,25 +1,4 @@
 function BioAmp_EMG_Continuo
-% BIOAMP EMG CONTINUO - BioAmp EXG Pill V1.0 + ADS1115 + ESP32-C3
-% Compatible con BioAmp_EEG_2_0.ino (lineas CSV: SEQ,RAW,EEG,ALFA,ALFARMS,RIEL).
-%
-% Objetivo: demostracion experimental de EMG superficial de banda LIMITADA.
-% Adquisicion Fs=256 Hz -> Nyquist=128 Hz; NO es EMG completo (20-450 Hz).
-% NO cambie los nombres de las 6 columnas enviadas por el Arduino.
-% Se usa UNICAMENTE RAW (voltaje de salida del BioAmp) para calcular EMG.
-% Filtro causal Butterworth 20-90 Hz (orden total 4) + notch 60 Hz Q=30.
-% Coeficientes calculados para Fs=256 Hz. No requiere Signal Processing Toolbox.
-% RMS deslizante 250 ms, rectificacion y referencia de reposo (2-7 s).
-% Los resultados en mV son DE SALIDA del amplificador, NO de la piel.
-% Ganancia aparente 3177x fue estimada a 10 Hz; conversion a uV es SOLO
-% orientativa y no valida una calibracion EMG en 20-90 Hz.
-%
-% SEGURIDAD: No colocar electrodos sobre personas conectadas a USB/PC sin
-% validacion profesional expresa de seguridad electrica de TODO el sistema.
-%
-% USO: cierre Monitor Serie de Arduino. Ejecute BioAmp_EMG_Continuo.
-% Mantenga el musculo relajado los primeros 8 s. Termine cerrando figura.
-% El archivo CSV se escribe continuamente y se cierra al finalizar.
-
 puerto = "COM3";                 % Cambiar si Windows asigna otro COM
 Fs = 256;                       % Debe coincidir con el Arduino actual
 baud = 230400;
