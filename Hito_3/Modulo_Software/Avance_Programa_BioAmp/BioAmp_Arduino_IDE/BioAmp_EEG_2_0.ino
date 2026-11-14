@@ -1,36 +1,4 @@
-/*
-  BIOAMP EEG 2.0 - BioAmp EXG Pill V1.0 + ADS1115 + ESP32-C3
-  Frecuencia nominal: 256 muestras por segundo, A0 con ADS1115.
-  Salida CSV serie: secuencia,RAW_mV,EEG_mV,Alfa_mV,AlfaRMS_mV,RIEL
-  Uso exclusivo junto con BioAmp_EEG_2_0.m (230400 baudios).
 
-  CONEXIONES DE ADQUISICION (sin generar ondas artificiales):
-  BioAmp: VCC=3V3, GND=GND, OUT=ADS A0.
-  ADS1115: VDD=3V3, GND=GND, ADDR=GND,
-           SDA=GPIO8, SCL=GPIO9.
-  NO conectar el generador GPIO6, la rama de 1 Mohm ni ADS A1.
-  Los electrodos, si se utilizan, van SOLO a entradas BioAmp,
-  no a la entrada ADS1115 directamente.
-
-  SEGURIDAD: No conectar personas mientras USB/PC u otra alimentacion
-  formen parte del sistema sin validacion especifica y documentada de
-  aislamiento, fuga y seguridad de TODO el montaje en esa configuracion.
-  Esto es un prototipo experimental, no dispositivo medico.
-
-  Se mantienen exactamente los coeficientes de filtros ya ensayados:
-  0.5-29.5 Hz adaptado de Upside Down Labs, BioAmp EXG Pill
-  (https://github.com/upsidedownlabs/BioAmp-EXG-Pill, licencia MIT).
-  Permission is hereby granted, free of charge, to any person obtaining a
-  copy of this software and associated documentation files (the "Software"),
-  to deal in the Software without restriction, including without limitation
-  the rights to use, copy, modify, merge, publish, distribute, sublicense,
-  and/or sell copies of the Software, and to permit persons to whom the
-  Software is furnished to do so, subject to the following conditions:
-  The above copyright notice and this permission notice shall be included
-  in all copies or substantial portions of the Software.
-  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND.
-  8-13 Hz: Butterworth por dos secciones de segundo orden.
-*/
 #include <Arduino.h>
 #include <Wire.h>
 #include <Adafruit_ADS1X15.h>
