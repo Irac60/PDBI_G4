@@ -1,23 +1,4 @@
 function BioAmp_EEG_Umbral_Continuo
-% BIOAMP EEG: MONITOR CONTINUO + MARCADOR EXPLORATORIO DE AMPLITUD.
-% Arduino SIN CAMBIOS: BioAmp_EEG_2_0.ino
-% Formato: SEQ,RAW_mV,EEG_mV,Alfa_mV,AlfaRMS_mV,RIEL
-%
-% IMPORTANTE: ESTE PROGRAMA NO DETECTA NI DESCARTA CRISIS EPILEPTICAS.
-% La marca de amplitud elevada NO es una alarma medica.
-% U=79.1815 mV RMS se obtuvo de parpadeos/actividad sin etiqueta,
-% no de crisis clinicamente confirmadas; NO es un umbral ictal.
-% Fuente del umbral: BioAmp_EEG_Continuo_20261111_233742.csv.
-% P97.5 de ventanas EEG 0.5-29.5 Hz, 128 muestras, salto 64,
-% centros de ventana entre 14 y 40 s, SIN ETIQUETA de reposo.
-%
-% Seguridad: para electrodos humanos se requiere verificacion profesional
-% de seguridad del montaje COMPLETO, incluyendo USB y PC si se emplean.
-% Sin esa aprobacion usar solamente registros CSV historicos/equipo validado.
-%
-% USO: cierra Monitor Serie de Arduino, ejecuta este archivo y cierra la
-% ventana de graficas para detener la adquisicion y cerrar el CSV.
-
 puerto = "COM3";
 Fs = 256;
 baud = 230400;
